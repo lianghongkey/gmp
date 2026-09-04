@@ -1,0 +1,3 @@
+2ed8ee69915fad1cbe13fb8ee85002cb18845983fb4bcd8ae8b6f5b5b4173b3b  ./load_image.bin
+18c4ea2a2cb4e154bbf59d98ebc21ddf6937737863d3354ab27ac55f45e79132  ./tokenizer.json.gz
+78317ae93e6f07ddc35d05e2edf3ff88c32a939c769832420e05083bcc1e3372  ./weights.npz

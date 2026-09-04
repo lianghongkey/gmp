@@ -1,0 +1,9 @@
+# demo
+
+| 文件 | 是什么 |
+| - | - |
+| `board_layout.png` | 板卡正反面，标出 JTAG、复位、LED、PCIe 接口、两组 DDR3、三颗晶振、FLASH 与温度传感器的位置 |
+| `board_front.jpg` | 装好散热片与风扇的正面实物 |
+| `board_back.jpg` | 背面实物，能看到另外两组 DDR3 颗粒 |
+
+跑起来的终端实录在 [`../docs/usage.md`](../docs/usage.md) 的「跑起来是什么样」一节。

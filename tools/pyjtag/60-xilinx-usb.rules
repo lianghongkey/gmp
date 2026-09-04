@@ -1,0 +1,10 @@
+# Xilinx Platform Cable USB / USB II —— 让普通用户能直接驱动线缆（pyjtag/xpc.py 需要）。
+#
+# 裸态（固件未加载）PID 有 0007/0009/000d/000f/0013/0015，灌完固件重新枚举成 0008，
+# 一条按 VID 匹配的规则全覆盖，免得漏掉某个型号的裸态 PID。
+#
+# 装法：
+#   sudo cp 60-xilinx-usb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   （已插着的线缆要拔插一次，规则只在设备接入时生效）
+SUBSYSTEM=="usb", ATTR{idVendor}=="03fd", MODE="0666"
