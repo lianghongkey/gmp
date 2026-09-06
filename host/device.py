@@ -1,15 +1,21 @@
 #!/usr/bin/env python
-"""设备访问层：经 JTAG 上来的一根 AXI-Lite 读写板子。
+"""设备访问层：一根 AXI-Lite 读写板子或仿真。
 
-    BscanAxiTransport   到板子的通路，只有 read32 / write32 两个动作
+    BscanAxiTransport   到板子的通路，经 JTAG，只有 read32 / write32 两个动作
+    SimSockTransport    到仿真的通路，经 unix socket，同样那两个动作，另有一条直接
+                        读写 DRAM 模型的后门
     Soc                 架在那对读写之上：读写控制寄存器、读写 CPU、批量搬运 DRAM、
                         读状态
 
 编号在 `hw_params.py`。
 """
+import atexit
 import os
+import socket
+import subprocess
 import sys
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GMP = os.path.dirname(HERE)                      # 发布包根目录
@@ -35,6 +41,7 @@ class BscanAxiTransport:
     """经 `tools/pyjtag` 读写板子。"""
 
     name = "xpc"
+    load_hint = "约 18 分钟"            # 灌权重那句提示里的时间，按线缆实测 0.55 MB/s 算
 
     TCK_MODE = None                     # None = 用 pyjtag 缺省档
 
@@ -70,6 +77,158 @@ class BscanAxiTransport:
 
     def close(self):
         self.cable.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# transport：仿真（`prebuilt/sim/` 的整机仿真，读写与上面那条同一套帧）
+# ══════════════════════════════════════════════════════════════════════════
+
+SIM_BIN = os.path.join(GMP, "prebuilt", "sim", "VSocCosimTop")
+#   unix socket 的路径有 108 字节上限，所以放 /tmp 下；同时跑几份仿真时用 GMP_SIM_SOCK
+#   给每份各一个，后起的那份会先删掉同名 socket
+SIM_SOCK = os.environ.get("GMP_SIM_SOCK", "/tmp/gmp_soc_axi.sock")
+
+
+class SimSockTransport:
+    """把 read32 / write32 发给仿真进程，帧走 unix socket。
+
+    仿真进程由本类拉起（工作目录是它自己那个目录，两份 `.hex` 从那里装入），`close`
+    时收掉，它打印的东西落在 `out/` 下，文件名跟着 socket 走。
+
+    除了板上那两个动作，它另有一条后门：直接读写 DRAM 模型里的存储，不占仿真拍。灌
+    权重、清残留都走后门（那些字节要是一笔一笔经片上互联搬，一趟跑不完）。
+    """
+
+    name = "sim"
+    load_hint = "几秒钟"                # 灌权重那句提示里的时间：后门不占仿真拍，只受磁盘与内存限制
+
+    CHUNK = 1 << 20                     # 后门一帧最多这么多字节
+    BATCH = 2048                        # 批量读写一次发这么多笔：请求全塞进缓冲会与响应互等
+
+    def __init__(self, bin_path=None, sock_path=None, timeout=30.0):
+        self.bin = os.path.abspath(bin_path or SIM_BIN)
+        if not os.path.isfile(self.bin):
+            raise IOError(f"没有仿真可执行文件 {self.bin}")
+        self.sock_path = sock_path or SIM_SOCK
+        if len(self.sock_path.encode()) > 100:
+            raise IOError(f"socket 路径 {self.sock_path} 超出 unix socket 的 108 字节上限，"
+                          "用 GMP_SIM_SOCK 换一个短的")
+        if os.path.exists(self.sock_path):
+            os.unlink(self.sock_path)
+        #   日志名跟着 socket 走：同时跑两份时两边的输出才不会写进同一个文件
+        base = os.path.basename(self.sock_path)
+        self.log = os.path.join(BUILD, "sim_" + (base[:-5] if base.endswith(".sock") else base) + ".log")
+        self._logf = open(self.log, "wb")
+        self.proc = subprocess.Popen([self.bin, self.sock_path], cwd=os.path.dirname(self.bin),
+                                     stdout=self._logf, stderr=subprocess.STDOUT)
+        atexit.register(self.close)
+        t0 = time.time()
+        while not os.path.exists(self.sock_path):
+            if self.proc.poll() is not None:
+                raise IOError(f"仿真起来就退了（exit {self.proc.returncode}），看 {self.log}")
+            if time.time() - t0 > timeout:
+                self.close()
+                raise IOError(f"仿真 {timeout:.0f} 秒还没把 socket 建起来，看 {self.log}")
+            time.sleep(0.05)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(self.sock_path)
+
+    # ── 帧：请求 9 字节 [op][addr LE][data LE]，响应 4 字节；批量就是把请求接起来发 ──
+    @staticmethod
+    def _req(op, addr, data=0):
+        return (bytes([ord(op)]) + (addr & 0xFFFFFFFF).to_bytes(4, "little")
+                + (data & 0xFFFFFFFF).to_bytes(4, "little"))
+
+    def _recv(self, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.sock.recv(n - len(buf))
+            if not chunk:
+                gone = "" if self.proc.poll() is None else f"（它已经退了，exit {self.proc.returncode}）"
+                raise IOError(f"仿真那头把 socket 关了{gone}，看 {self.log}")
+            buf += chunk
+        return bytes(buf)
+
+    def _words(self, n):
+        b = self._recv(4 * n)
+        return [int.from_bytes(b[4 * i:4 * i + 4], "little") for i in range(n)]
+
+    def write32(self, addr, data):
+        self.sock.sendall(self._req("W", addr, data))
+        self._recv(4)
+
+    def read32(self, addr):
+        self.sock.sendall(self._req("R", addr))
+        return self._words(1)[0]
+
+    def write32_many(self, items, verify=True):
+        """`verify` 是 JTAG 那条要的参数，仿真这边不写完再读一遍。"""
+        items = list(items)
+        for i in range(0, len(items), self.BATCH):
+            part = items[i:i + self.BATCH]
+            self.sock.sendall(b"".join(self._req("W", a, d) for a, d in part))
+            self._recv(4 * len(part))
+
+    def read32_many(self, addrs, gap=1):
+        """`gap` 同样是 JTAG 那条的参数，这里没有它的事。"""
+        addrs = list(addrs)
+        out = []
+        for i in range(0, len(addrs), self.BATCH):
+            part = addrs[i:i + self.BATCH]
+            self.sock.sendall(b"".join(self._req("R", a) for a in part))
+            out += self._words(len(part))
+        return out
+
+    # ── 后门：直接读写 DRAM 模型的存储，不占仿真拍（板上没有这条） ──
+    def dram_preload(self, addr, data):
+        """把 bytes 放进 DRAM 模型，地址是系统字节地址，长度与对齐随意。"""
+        for off in range(0, len(data), self.CHUNK):
+            part = data[off:off + self.CHUNK]
+            self.sock.sendall(self._req("P", addr + off, len(part)) + part)
+            if self._words(1)[0] != len(part):
+                raise IOError("DRAM 后门写：回的字节数对不上")
+
+    def dram_peek(self, addr, nbytes):
+        out = bytearray()
+        for off in range(0, nbytes, self.CHUNK):
+            n = min(self.CHUNK, nbytes - off)
+            self.sock.sendall(self._req("G", addr + off, n))
+            if self._words(1)[0] != n:
+                raise IOError("DRAM 后门读：回的字节数对不上")
+            out += self._recv(n)
+        return bytes(out)
+
+    def cycles(self):
+        """仿真打到第几拍（板上那条是从 STAT 窗口读的拍计数）。"""
+        self.sock.sendall(self._req("T", 0) + self._req("U", 0))
+        lo, hi = self._words(2)
+        return lo | (hi << 32)
+
+    def close(self):
+        """关 socket、收掉仿真进程。重复调用没有副作用（退出时 atexit 还会调一次）。"""
+        sock = getattr(self, "sock", None)
+        if sock is not None:
+            self.sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+        proc = getattr(self, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        logf = getattr(self, "_logf", None)
+        if logf is not None and not logf.closed:
+            logf.close()
+        path = getattr(self, "sock_path", None)
+        if path and os.path.exists(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 # ══════════════════════════════════════════════════════════════════════════

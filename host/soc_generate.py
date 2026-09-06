@@ -1,12 +1,16 @@
 #!/usr/bin/env python
-"""在真板上给一段话做 prefill，再逐 token decode，把生成的文字打印出来。
+"""在真板或仿真上给一段话做 prefill，再逐 token decode，把生成的文字打印出来。
 
     python host/soc_generate.py "今天天气不错，我们去"
     python host/soc_generate.py --chat "请简单介绍一下你自己。"
     python host/soc_generate.py --file prompt.txt --max-new 32 -v
+    python host/soc_generate.py --sim "今天天气不错，我们去"
 
 开跑前查一遍板子，不对的自己修（烧 bit、灌权重）：`--no-auto` 只诊断不动手，`--check-only`
 查完就退出，`--dry-run` 只分词不碰板子。流程与排错见 `docs/usage.md`。
+
+手上没有板子时加 `--sim`：同一套流程改在 `prebuilt/sim/` 的整机仿真上跑，一步比板上慢
+几百倍，权重每趟都要重灌，见 `docs/simulation.md`。
 
 分词用 `data/tokenizer.json.gz` 里的词表，编码是本文件里的纯 Python BPE，解码按 GPT-2 的
 byte-level 表还原。`--vocab` 指到一份 GGUF 时改用 llama.cpp 的 `llama-tokenize`。
@@ -41,6 +45,7 @@ BIT_DEFAULT = os.path.join(DEV.GMP, "prebuilt", "bit", "top_jtag_p3.bit")
 JTAG_DIR = os.path.join(DEV.GMP, "tools")
 sys.path.insert(0, JTAG_DIR)
 IDCODE_7K480T = 0x03751093          # 低 28 位；bit[31:28] 是版本号
+DECODE_CYCLES = 24_700_000          # 一步 decode 的拍数（板上 50 MHz 上 0.49 秒），估仿真要多久用
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -263,11 +268,18 @@ class Board:
     def __init__(self, tr):
         self.tr = tr
         self.soc = DEV.Soc(tr)
+        #   仿真那条通路能直接读写 DRAM 模型，搬字节都走它；板上只有经片上互联这一条
+        self.back = getattr(tr, "dram_preload", None) is not None
 
     def put(self, addr, data):
-        RT.dram_put(self.tr, self.soc, addr, data)
+        if self.back:
+            self.tr.dram_preload(addr, data)
+        else:
+            RT.dram_put(self.tr, self.soc, addr, data)
 
     def get(self, addr, nbytes):
+        if self.back:
+            return self.tr.dram_peek(addr, nbytes)
         return RT.dram_get(self.tr, self.soc, addr, nbytes)
 
     def put_i32(self, addr, v):
@@ -488,9 +500,39 @@ def open_board(a):
     return tr, programmed
 
 
+def open_sim(a):
+    """起仿真、连上、看它认不认这颗 SoC。返回 (transport, 有没有重烧)，仿真没有烧录这一步。"""
+    try:
+        tr = DEV.SimSockTransport(bin_path=a.sim_bin, sock_path=a.sim_sock)
+    except IOError as e:
+        raise BoardNotReady(f"仿真起不来：{e}")
+    print(f"    仿真起来了：{os.path.relpath(tr.bin, DEV.GMP)}（pid {tr.proc.pid}），"
+          f"它打印的东西落在 {os.path.relpath(tr.log, DEV.GMP)}")
+    soc = DEV.Soc(tr)
+    m = soc.stat_rd(DEV.STAT_MAGIC)
+    if m != DEV.SOC_MAGIC:
+        tr.close()
+        raise BoardNotReady(f"STAT 魔数读到 {_hex(m)}，不是 {_hex(DEV.SOC_MAGIC)}："
+                            "这份仿真里的不是这颗 SoC")
+    t0 = time.time()
+    while not soc.stat_rd(DEV.STAT_BOARD) & 1:
+        if time.time() - t0 > 30:
+            tr.close()
+            raise BoardNotReady("DRAM 模型 30 秒没报校准完成（STAT_BOARD bit0 = 0）")
+        time.sleep(0.1)
+    c0 = tr.cycles()
+    time.sleep(1.0)
+    rate = (tr.cycles() - c0) / 1e3
+    print(f"    仿真里认出这颗 SoC，空转 {rate:.0f} k 拍/秒"
+          + (f"（一步 decode {DECODE_CYCLES / 1e4:.0f} 万拍，这个速率下约 "
+             f"{DECODE_CYCLES / (rate * 1e3) / 60:.0f} 分钟）" if rate > 0 else ""))
+    return tr, False
+
+
 def ensure_weights(a, bd, w, programmed, stop=None):
+    hint = getattr(bd.tr, "load_hint", "约 18 分钟")
     if a.load_weights:
-        print("── --load-weights：灌整份权重 ──")
+        print(f"── 灌整份权重（{RT.WEIGHTS_BYTES / 2**20:.0f} MiB，{hint}）──")
         load_weights(bd, w, stop)
     if not a.check_weights:
         return
@@ -501,8 +543,8 @@ def ensure_weights(a, bd, w, programmed, stop=None):
     print(f"    权重抽查 {len(bad)}/{a.check_weights} 处不一致"
           + ("（刚重烧过，DRAM 随 MIG 复位丢了）" if programmed else "（DRAM 里不是这份权重）"))
     if a.no_auto:
-        raise BoardNotReady("--no-auto：不灌。去掉它会整份重灌（18 分钟）")
-    print(f"── 整份重灌权重（{RT.WEIGHTS_BYTES / 2**20:.0f} MiB，约 18 分钟）──")
+        raise BoardNotReady(f"--no-auto：不灌。去掉它会整份重灌（{hint}）")
+    print(f"── 整份重灌权重（{RT.WEIGHTS_BYTES / 2**20:.0f} MiB，{hint}）──")
     load_weights(bd, w, stop)
     bad = check_weights(bd, w, a.check_weights, a.seed + 1, a.verbose)
     if bad:
@@ -550,13 +592,23 @@ def main():
                     help="烧录走 pyjtag 的 program_bit（缺省）还是 vivado 的 tools/program.tcl")
     ap.add_argument("--no-auto", action="store_true", help="板子不对时只诊断，不烧 bit、不灌权重")
     ap.add_argument("--check-only", action="store_true", help="板子与权重查完（该修的修完）就退出，不生成")
-    ap.add_argument("--max-wall", type=float, default=120.0, help="每轮的墙钟超时（秒）")
+    ap.add_argument("--max-wall", type=float, default=None,
+                    help="每轮的墙钟超时（秒；缺省板上 120，仿真 7200）")
+    ap.add_argument("--sim", action="store_true",
+                    help="不接板子，在 prebuilt/sim/ 的整机仿真上跑（慢，见 docs/simulation.md）")
+    ap.add_argument("--sim-bin", default=None, help="换一份仿真可执行文件")
+    ap.add_argument("--sim-sock", default=None,
+                    help="仿真的 unix socket 路径（缺省 /tmp/gmp_soc_axi.sock，同时跑几份要各给一个）")
     ap.add_argument("--no-burst", action="store_true", help="不用 JTAG burst")
     ap.add_argument("--show-special", action="store_true", help="控制 token 也打印出来（放在〈〉里）")
     ap.add_argument("--dry-run", action="store_true", help="只分词、只算计划，不碰板子")
     ap.add_argument("--seed", type=int, default=0, help="抽查权重用的随机种子")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
+    if a.max_wall is None:
+        a.max_wall = 7200.0 if a.sim else 120.0
+    if a.sim and a.program:
+        ap.error("--sim 下没有烧录这一步（仿真里就是这颗 SoC）")
 
     if a.file:
         text = open(a.file, encoding="utf-8").read()
@@ -606,11 +658,20 @@ def main():
         os.environ.setdefault("JTAG_BURST", "1")
         os.environ.setdefault("JTAG_RBURST", "1")
     stop = Stopper()
-    print("── 板子 ──")
-    tr, programmed = open_board(a)
+    if a.sim:
+        print("── 仿真 ──")
+        tr, programmed = open_sim(a)
+    else:
+        print("── 板子 ──")
+        tr, programmed = open_board(a)
     bd = Board(tr)
     soc = bd.soc
+    #   仿真的 DRAM 活在进程里，起一趟空一趟，权重每次都得重灌（走后门，比板上快）
+    if a.sim and a.check_weights and not a.load_weights:
+        a.load_weights = True
     ensure_weights(a, bd, w, programmed, stop)
+    if a.sim and not a.load_weights and not a.check_only:
+        print("    （--check-weights 0：这趟没灌权重，DRAM 模型是空的，生成出来的东西不作数）")
     if a.check_only:
         print("    --check-only：到此为止")
         tr.close()

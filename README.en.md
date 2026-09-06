@@ -19,7 +19,7 @@ hardware in Python and emits Verilog deterministically.
 
 ## What the board has done
 
-![the board with its heatsink on](demo/board_front.jpg)
+![the board, front and back](demo/board_front_back.jpg)
 
 The tail of one real run (2026-09-04; the full transcript is in
 [`docs/usage.md`](docs/usage.md), in Chinese):
@@ -53,10 +53,11 @@ rounds, 73 bit-exact checks) passes on the board.
 | Path | Contents |
 | - | - |
 | `prebuilt/bit/` | Two bitstreams: `top_jtag_p3.bit` (50 MHz) and `top_jtag_c66n.bit` (66.7 MHz) |
+| `prebuilt/sim/` | The whole-SoC simulator executable and the two data files it loads, for running the same flow without a board |
 | `data/weights.npz` | Fixed-point weights; each array is named after the DRAM address it goes to |
 | `data/load_image.bin` | The image the board loads itself from at power-up |
 | `data/tokenizer.json.gz` | The vocabulary and merges, extracted from the Qwen3-0.6B GGUF |
-| `host/` | All host-side code: `soc_generate.py` (entry point), `device.py` (talks to the board), `runtime.py` (weights and per-round handshake), `hw_params.py` (constants) |
+| `host/` | All host-side code: `soc_generate.py` (entry point), `device.py` (talks to the board or the simulator), `runtime.py` (weights and per-round handshake), `hw_params.py` (constants) |
 | `tools/pyjtag/` | A pure-Python JTAG stack; programming and register access need no Vivado |
 
 What ships here are the compiled artifacts plus the host tools that drive them, so that the
@@ -65,7 +66,7 @@ scripts are not included, so nothing here can regenerate a bitstream or retarget
 
 ## Where to start
 
-The three documents under `docs/` are written in Chinese.
+The four documents under `docs/` are written in Chinese.
 
 1. [`docs/setup.md`](docs/setup.md) — the board and cable required, what to install, how to grant
    USB permission.
@@ -73,6 +74,8 @@ The three documents under `docs/` are written in Chinese.
    step takes, and what to check when the output looks wrong.
 3. [`docs/bitstream.md`](docs/bitstream.md) — how fast each of the two bitstreams runs and how
    much of the device it occupies.
+4. [`docs/simulation.md`](docs/simulation.md) — how to run the same flow on the simulator when
+   you have no board.
 
 Once everything is in place, one command starts a conversation:
 
@@ -80,10 +83,14 @@ Once everything is in place, one command starts a conversation:
 python host/soc_generate.py --chat "请用一句话介绍一下你自己。"
 ```
 
+Without a board, the same command with `--sim` runs on the simulator instead: much slower,
+everything else the same.
+
 Photos and recordings of the board in action are under `demo/`.
 
 ## License
 
-MIT, see `LICENSE`. Two third-party pieces keep their own terms: the vocabulary inside
-`data/tokenizer.json.gz` comes from Qwen3-0.6B (Apache-2.0), and `tools/pyjtag/xusb_*.hex` are
-Xilinx cable firmware images distributed with the cable.
+MIT, see `LICENSE`. Three third-party pieces keep their own terms: the vocabulary inside
+`data/tokenizer.json.gz` comes from Qwen3-0.6B (Apache-2.0), `tools/pyjtag/xusb_*.hex` are
+Xilinx cable firmware images distributed with the cable, and `prebuilt/sim/VSocCosimTop` links
+in the Verilator 5.020 runtime library (dual-licensed LGPL-3.0-only or Artistic-2.0).

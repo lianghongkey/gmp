@@ -4,7 +4,7 @@
 
 本文介绍这份发布包是什么、板上已经做到了什么、包里有哪些东西，读完知道该从哪份文档接着往下走。
 
-**文档模式**：导览。具体操作在 `docs/` 下三份文档里。
+**文档模式**：导览。具体操作在 `docs/` 下四份文档里。
 
 ## 这是什么
 
@@ -13,12 +13,12 @@ Qwen3 0.6B 的权重。主机把一段话经 JTAG 送进去，芯片自己逐个
 文字回传给主机打印出来。
 
 整个网络的算子序列由配套的编译器编好，做成一份程序放进 DRAM，芯片启动后照着跑，主机只负责喂
-prompt 与取回结果。RTL 不是手写 Verilog，是用 pyrilog（在 Python 里写硬件、确定性地生成
-Verilog）写的。
+prompt 与取回结果。RTL 不是直接写的 Verilog，是用 pyrilog（在 Python 里描述硬件，再确定性地生成
+Verilog）产出的。
 
 ## 板上做到了什么
 
-![装好散热的板子](demo/board_front.jpg)
+![板卡正反面实物](demo/board_front_back.jpg)
 
 一趟实跑的最后几行（2026-09-04，完整实录见 [`docs/usage.md`](docs/usage.md)）：
 
@@ -33,7 +33,7 @@ Verilog）写的。
 ── 生成 13 个 token（遇到停止 token），decode 平均 0.49 s/步 ──
 ```
 
-同一段话，与 llama.cpp 用同一份 GGUF 做贪心解码的结果逐字对照（板子刚断电重上）：
+同一段话，与 llama.cpp 用同一份 GGUF 做贪心解码的结果逐字对照（板子刚断电又上电）：
 
 | prompt | 板上生成 | 与 llama.cpp（f32） |
 | - | - | - |
@@ -49,10 +49,11 @@ Verilog）写的。
 | 路径 | 内容 |
 | - | - |
 | `prebuilt/bit/` | 两份 bitstream：`top_jtag_p3.bit`（50 MHz）与 `top_jtag_c66n.bit`（66.7 MHz） |
+| `prebuilt/sim/` | 整机仿真的可执行文件与它装入的两份数据，手上没有板子时用它跑同一套流程 |
 | `data/weights.npz` | 定点权重，每个数组的名字就是它在 DRAM 里的地址 |
 | `data/load_image.bin` | 启动镜像，板子上电后照着它把程序装进片上 |
 | `data/tokenizer.json.gz` | 分词用的词表，从 Qwen3-0.6B 的 GGUF 里摘出来的那几个字段 |
-| `host/` | 主机侧全部代码：`soc_generate.py` 入口、`device.py` 读写板子、`runtime.py` 读权重与逐轮通讯、`hw_params.py` 常量 |
+| `host/` | 主机侧全部代码：`soc_generate.py` 入口、`device.py` 读写板子或仿真、`runtime.py` 读权重与逐轮通讯、`hw_params.py` 常量 |
 | `tools/pyjtag/` | 纯 Python 的 JTAG 栈，烧录与读写都不需要 Vivado |
 
 这份包里装的是编译好的产物与驱动它们的主机工具，目的是在同型号板子上把上面那些结果复现出来。
@@ -63,6 +64,7 @@ RTL 源码、编译器、综合脚本不在包内，所以包里的东西不能�
 1. [`docs/setup.md`](docs/setup.md)：要哪些硬件、装什么、USB 权限怎么给。
 2. [`docs/usage.md`](docs/usage.md)：烧录、灌权重、生成文字的完整流程，每步要多久，出错了先看什么。
 3. [`docs/bitstream.md`](docs/bitstream.md)：两份 bitstream 各跑多快、占多少片上资源。
+4. [`docs/simulation.md`](docs/simulation.md)：手上没有板子时，同一套流程怎么在仿真上跑。
 
 装好之后一条命令就能对话：
 
@@ -70,10 +72,13 @@ RTL 源码、编译器、综合脚本不在包内，所以包里的东西不能�
 python host/soc_generate.py --chat "请用一句话介绍一下你自己。"
 ```
 
+手上没有板子时，同一条命令加 `--sim` 就改在仿真上跑，慢很多，别的都一样。
+
 `demo/` 下是板子的照片。
 
 ## 授权
 
-本包按 MIT 授权，见 `LICENSE`。第三方来源的两样东西各自遵循自己的授权：`data/tokenizer.json.gz`
+本包按 MIT 授权，见 `LICENSE`。第三方来源的三样东西各自遵循自己的授权：`data/tokenizer.json.gz`
 里的词表出自 Qwen3-0.6B（Apache-2.0），`tools/pyjtag/` 里的 `xusb_*.hex` 是 Xilinx 的线缆固件，
-随线缆分发。
+随线缆分发，`prebuilt/sim/VSocCosimTop` 里链进了 Verilator 5.020 的运行时库（LGPL-3.0-only
+或 Artistic-2.0 双授权）。

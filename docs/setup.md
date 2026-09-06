@@ -1,7 +1,8 @@
 # 环境搭建
 
 本文列出把这份包跑起来要准备的硬件、软件与权限，做完最后一节的三条自检就可以进
-[`usage.md`](usage.md) 开始跑。
+[`usage.md`](usage.md) 开始跑。手上没有板子时改看 [`simulation.md`](simulation.md)，那条路
+不用板子、线缆和 USB 权限，下面“软件”一节里只要 numpy。
 
 **文档模式**：操作步骤。
 
@@ -42,13 +43,13 @@ pip install numpy pyusb
 
 烧录与读写走 `tools/pyjtag/`（随包，纯 Python），不需要 Vivado，也不需要 `hw_server`。
 
-分词器随包带全（`data/tokenizer.json.gz` 加包内的纯 Python BPE），不需要 `tokenizers` 之类的包。
+分词要用的东西包里都有（`data/tokenizer.json.gz` 加包内的纯 Python BPE），不需要 `tokenizers` 之类的包。
 
 两样可选的：
 
 * **Qwen3-0.6B 的 GGUF 与 llama.cpp 的 `llama-tokenize`**：想拿板上结果与 llama.cpp 逐字
   对照时才需要，`--vocab <那份 gguf>` 把编码交给它。两条路径在常规中英文上给出同一串 token。
-* **Vivado**：只在 pyjtag 烧录后 DONE 没拉起来时作兜底（`--prog-tool vivado`，走
+* **Vivado**：只有 pyjtag 烧录后 DONE 没拉起来时才用得上（`--prog-tool vivado`，走
   `tools/program.tcl`）。正常不需要。
 
 ## USB 权限
@@ -60,10 +61,10 @@ sudo cp tools/pyjtag/60-xilinx-usb.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-规则只在设备接入时生效，已经插着的线缆要拔插一次。
+规则只在设备接入时生效，已经插着的线缆要拔下来重插一次。
 
 线缆第一次打开时 pyjtag 会把固件（`tools/pyjtag/xusb_xp2.hex`）灌进去，灌完线缆会重新枚举成
-另一个 PID。固件常驻线缆的 RAM，拔电才丢。
+另一个 PID。固件常驻在线缆的 RAM 里，断电才会丢。
 
 ## 数据落位
 
@@ -74,6 +75,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 | - | -: | - |
 | `prebuilt/bit/top_jtag_p3.bit` | 14 MB | 50 MHz 的 bitstream |
 | `prebuilt/bit/top_jtag_c66n.bit` | 14 MB | 66.7 MHz 的 bitstream |
+| `prebuilt/sim/VSocCosimTop` | 2.1 MB | 整机仿真，没有板子时走它 |
+| `prebuilt/sim/cpu_boot_rom.hex`、`func_tbl.hex` | 21 KB | 仿真起来时装入的引导码与函数表 |
 | `data/weights.npz` | 604 MB | 定点权重，每个数组的名字就是它在 DRAM 里的地址 |
 | `data/load_image.bin` | 52 KB | 启动镜像，板子上电后照着它把程序装进片上 |
 | `data/tokenizer.json.gz` | 1.4 MB | 分词用的词表与 merges |
