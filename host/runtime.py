@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""跑这份产物要的三样：读权重、在 DRAM 上搬字节、与板上 CPU 逐轮通讯。
-
-产物是 `data/` 下的两个文件：`weights.npz`（每个数组的名字就是它落在 DRAM 的地址）与
-`load_image.bin`（板子上电后照着自装载的镜像）。地址与轮次口径写在下面这组常量里。
-"""
+"""跑这份产物要的三样：读权重、在 DRAM 上搬字节、与板上 CPU 逐轮通讯。"""
 import os
 import sys
 import time
@@ -19,24 +15,23 @@ WEIGHTS_NPZ = os.path.join(DATA, "weights.npz")
 IMAGE_BIN = os.path.join(DATA, "load_image.bin")
 
 # ══ 这份产物在 DRAM 上的落位 ══════════════════════════════════════════════
-WEIGHTS_LO, WEIGHTS_HI = 0x0005000000, 0x002AC06000     # 权重区
-WEIGHTS_BYTES = WEIGHTS_HI - WEIGHTS_LO                 # 灌权重时按这个数算进度
-TOKENS_BASE = 0x0031C06000                              # token 串，每格 4 字节
+WEIGHTS_LO, WEIGHTS_HI = 0x0005000000, 0x00349AC000
+WEIGHTS_BYTES = WEIGHTS_HI - WEIGHTS_LO
+TOKENS_BASE = 0x003B9AC000
 
-# KV cache：28 层，每层 K 与 V 各一块
-KV_BASE, KV_LAYERS = 0x002AC06000, 28
+KV_BASE, KV_LAYERS = 0x00349AC000, 28
 KV_LAYER_STRIDE, KV_KV_GAP = 0x400000, 0x200000
-KV_SLOT, KV_MAX_CTX = 2048, 1024                        # 一格的字节数、最多几格
+KV_SLOT, KV_MAX_CTX = 2048, 1024
 
-# 中间张量里每轮要清掉的几块：(地址, 字节数)
-ARENA = [(0x0032006000, 2048), (0x0032006800, 2048), (0x0032007000, 4096),
-         (0x0032007800, 6144), (0x0032008000, 2048), (0x0032008800, 2048),
-         (0x0032009000, 4096), (0x003200A800, 6144)]
+# 每轮要清掉的几块中间张量：(地址, 字节数)
+ARENA = [(0x003BDAC000, 2048), (0x003BDAC800, 2048), (0x003BDAD000, 4096),
+         (0x003BDAD800, 6144), (0x003BDAE000, 2048), (0x003BDAE800, 2048),
+         (0x003BDAF000, 4096), (0x003BDB0800, 6144)]
 
 # ══ 与 CPU 的口径 ═════════════════════════════════════════════════════════
 SID_STOP, SID_PREFILL, SID_DECODE = 0, 1, 2
-PREFILL_SEQ = 64                # prefill 一轮固定处理这么多 token
-CTX_MAX = 128                   # decode 的 n_seq 上限，也是 prompt 加生成的总上限
+PREFILL_SEQ = 64                # prefill 一轮处理这么多 token
+CTX_MAX = 128                   # prompt 加生成的总上限
 
 GP_CMD, GP_NSEQ, GP_STAT, GP_VER, GP_CYC = 0, 1, 16, 17, 18
 ST_IDLE, ST_BUSY, ST_ERR = 1, 2, 0x80
@@ -70,13 +65,12 @@ def kv_blocks():
     return out
 
 
-_CHUNK = 8 << 10
+_CHUNK = 16 << 10
 
 
 def dram_put(tr, soc, addr, data):
     if addr % 64 or len(data) % 64:
-        # 搬运按 64 字节整块走，写不进块内的一截：把首尾那两个不完整的块先读回来、
-        # 改掉要改的几个字节、再整块写回去。
+        # 首尾两个不完整的块先读回来、改掉要改的几个字节、再整块写回去
         lo = addr & ~0x3F
         hi = (addr + len(data) + 63) & ~0x3F
         buf = bytearray(dram_get(tr, soc, lo, hi - lo))
@@ -155,6 +149,3 @@ class Host:
         sim = 0 if self.wall_limit is not None else self.tr.cycles() - c0
         return st & ST_ERR, self.gp_rd(GP_CYC), sim, time.time() - w0
 
-
-if __name__ == "__main__":
-    sys.exit(0 if main() else 1)

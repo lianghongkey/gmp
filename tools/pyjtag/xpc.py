@@ -4,35 +4,7 @@
 开源代码 —— UrJTAG/xc3sprog 的 xpc 驱动（Kolja Waschk 逆向，GPL）与
 hexalinq/libxpc。移植的是协议事实（USB 请求常量与数据格式），代码为重写。
 
-## 设备形态
-
-* FX2 固件未加载（裸态，插上电即此态）：`03fd:0013` 等原始 PID。
-* 固件已加载：真品重新枚举成 **`03fd:0008`**，但**并非都会换 PID** —— 实测
-  `03fd:0013` 这颗灌完固件后 PID 保持 0013 不变，只是 0xB0 协议开始应答。
-  所以判据是「0xB0 读得到非零版本 + 能走一次空移位」，不是「PID 变成 0008」。
-* 固件存 FX2 RAM，由主机灌入（fxload 同款流程：vendor req 0xA0 写 RAM +
-  CPUCS 复位），拔电即失。五份 hex 随例子入库在本目录（`xusb_emb.hex` 与
-  `xusb_xlp.hex` 内容相同）。选错固件的表现分两档：0xB0 完全不应答，或者
-  版本读得出、一移位就超时（`xusb_emb` 在 0013 上就是后者）。
-* **批量端点只在带端点的 altsetting 上。** 实测这颗 alt0 没有任何端点，
-  EP2/EP6 在 alt1，claim_interface 之后必须 set_interface_altsetting。
-
-## 协议摘要（固件加载后，全部走 EP0 vendor req 0xB0 + EP2/EP6 bulk）
-
-    0x40 0xB0 val=0x0028 idx=0x11/0x12   模式/预分频（初始化序列用）
-    0x40 0xB0 val=0x0030 idx=bits        写 GPIO（bit3=PROG 2=TCK 1=TMS 0=TDI）
-    0xC0 0xB0 val=0x0038           →1B   读 GPIO（bit0=TDO）
-    0xC0 0xB0 val=0x0050 idx=0/1   →2B   固件/CPLD 版本
-    0x40 0xB0 val=0x0010/0x0018          输出禁止/使能
-    0x40 0xB0 val=0x00A6 idx=N           批量移位 N 位，随后：
-        bulk OUT EP2：ceil(N/4) 个小端 16-bit 字，每字 4 个位组：
-            低字节 [3:0]=TDI×4 [7:4]=TMS×4
-            高字节 [11:8]=TCK 脉冲×4 [15:12]=采样 TDO×4
-        若有采样位：bulk IN EP6(0x86) 收 TDO，32-bit 小端字流，
-        末个不满 32 位的字有对齐怪癖（见 _realign_tdo）。
-
-    ⚠ N 不能是 4 的整倍数（CPLD 怪癖）—— 为凑数补一个不打 TCK 的哑位。
-    单次 bulk 上限 4096 字节 = 8191 位（xc3sprog 的 CPLD_MAX_BYTES）。
+固件存 FX2 RAM，由主机灌入，拔电即失；五份 hex 随包放在本目录。
 """
 
 import os
@@ -52,9 +24,8 @@ XPC_VID = 0x03FD
 XPC_PID_FW = 0x0008          # 固件已加载
 XPC_PID_RAW = (0x0013, 0x000D, 0x000F, 0x0009, 0x0007, 0x0015)  # 裸态候选
 
-# 裸态 PID → 首选固件。这张表只是猜测的起点：同一个 PID 在不同批次的线缆上
-# 未必用同一份固件（0x0013 实测要 xusb_xp2.hex，而非 xusbdfwu.rules 暗示的 emb），
-# 所以首选不成立时会按 FIRMWARE_ORDER 逐个试，以「能走一次空移位」为准。
+# 裸态 PID → 首选固件。同一个 PID 在不同批次的线缆上未必用同一份固件，首选不成立时
+# 按 FIRMWARE_ORDER 逐个试，以「能走一次空移位」为准。
 FIRMWARE_BY_PID = {0x0007: "xusb_xup.hex", 0x0009: "xusb_xup.hex",
                    0x000D: "xusb_xp2.hex", 0x000F: "xusb_xlp.hex",
                    0x0013: "xusb_xp2.hex", 0x0015: "xusb_xse.hex"}
@@ -67,59 +38,17 @@ GPIO_TCK = 1 << 2
 GPIO_PROG = 1 << 3
 GPIO_TDO = 1 << 0
 
-MAX_SHIFT_BITS = 8191        # 采样传输的单次上限（避开 4 的整倍数另算）
-MAX_WRITE_BITS = 49151       # 纯写传输的单次上限（3 倍于上，见下）
-#
-# 8191 抄自 xc3sprog 的 CPLD_MAX_BYTES（4096 字节 payload）。实测线缆一次能收
-# 65535 位（0x00A6 的 index 是 16 位），而且**只有纯写路径吃得到这个收益**：
-#
-#     1024 字 write_burst   分块 8191 → 49151
-#         6 MHz    7.45 → 7.52 µs/字   （落在噪声里，无收益）
-#        12 MHz    4.68 → 3.78 µs/字   （+19%，1.059 MB/s）
-#
-# 6 MHz 下移位本身占 82%，几次 USB 往返摊进去看不见；12 MHz 把移位时间减半，
-# 固定开销占比翻倍才显出来。所以别拿低档位的测速结论外推到高档位。
-#
-# 采样路径仍留 8191：读方向的位速率被 FX2 的采样开销卡在 1.12 M 位/秒，
-# read_burst 实测 28.09 µs/字 对着 32/1.12e6 = 28.6 µs 已经贴住上限，
-# 加大分块换不到东西，没必要去赌固件在满载 payload 下的采样对齐行为。
+MAX_SHIFT_BITS = 8191        # 采样传输的单次上限
+MAX_WRITE_BITS = 49151       # 纯写传输的单次上限
 
-# TCK 档位：0x0028 请求的 index。档位表与 xsdb `jtag frequency -list` 报的
-# {0.75, 1.5, 3, 6, 12} MHz 一一对应（实测位速率略低，差的是 FX2 的处理开销）：
-#
-#     idx    实测位速率   标称      BYPASS 回环（1000~8100 位，末位边界不计）
-#     0x20    9.26 M     12 MHz    ❌ 错 16~17%，偶发 USBError
-#     0x10    5.20 M      6 MHz    ✅ 零错 —— 也是官方默认档
-#     0x11    2.90 M      3 MHz    ✅
-#     0x12    1.47 M    1.5 MHz    ✅ ← 从 xc3sprog 照抄来的原值，官方默认的 1/4
-#     0x13    0.71 M   0.75 MHz    ✅
-#     0x14    0.37 M   0.375 MHz   ✅
-#     其余值一律回落到 3 MHz 档
-#
-# 12 MHz 档只有采 TDO 会错（BYPASS 回环 8000 位 ×10 轮、4000 位 ×10 轮都稳定 24.8%），
-# 纯写是好的（IR 写在 12 MHz、切回 6 MHz 读 DR，40/40 正确），所以烧 bitstream 那条
-# 不采样的通道走 12 MHz，其余一律 6 MHz。
-#
-# usbmon 抓 hw_server 的结论（scratchpad/cap.txt，2502 个 URB）：
-#   · 官方的初始化序列与本文件的 _init_external 逐条相同，唯一差别是最后那个档位 ——
-#     官方落在 0x10，本文件早期从 xc3sprog 照抄成了 0x12。
-#   · 官方全程只发过 0x0028 idx=0x0011 / 0x0010，从没发过 0x0020。xsdb 报
-#     `jtag frequency 12000000` 只是它自己的软件状态，硬件收到的仍是 6 MHz 档 ——
-#     所谓「官方能在 12 MHz 下扫链」是假象，6 MHz 就是官方认可的上限。
-#   · 官方读 TDO 用的也是 0xA6 + EP2/EP6，没有另一条硬件采样通道。
-#   · 官方读 CPLD 版本同样得到 0xfffe（抓包里的 feff），所以这个值正常，不是故障。
+# TCK 档位：0x0028 请求的 index。12 MHz 档采 TDO 会错、纯写是好的，所以烧 bitstream
+# 那条不采样的通道走 12 MHz，其余一律 6 MHz。
 TCK_MODE_FAST = 0x10         # 6 MHz：读写都零错
 TCK_MODE_WRITE_ONLY = 0x20   # 12 MHz：只在不采 TDO 时可用
 TCK_MODE_DEFAULT = TCK_MODE_FAST
 
 # 线缆固件：随例子入库的本地拷贝（--firmware 可覆盖）。
 FIRMWARE = os.path.join(os.path.dirname(__file__), "xusb_xp2.hex")
-
-
-def _find_firmware(pid):
-    """按裸态 PID 选固件（全部随模块自带，见 FIRMWARE_BY_PID）。"""
-    name = FIRMWARE_BY_PID.get(pid, "xusb_xp2.hex")
-    return os.path.join(os.path.dirname(__file__), name)
 
 
 class XpcError(RuntimeError):
@@ -499,57 +428,6 @@ class XpcCable:
         out[2::4] = b >> 4
         out[3::4] = 0x0F
         return out.tobytes()
-
-    def shift_dr_head_stream(self, head_val, head_bits, data):
-        """一次 A6 传输发完「一个短帧 + 一个长数据帧」两次 DR 扫描。
-
-        burst 的头帧只有 66 位，单独发一次却要一整趟 USB 事务（约 170 µs），
-        跟其后几千位的数据帧一样贵。这里把两帧拼进同一个 payload。
-
-        对齐是拼接的前提：两帧的导航都用 4 位（RTI 多停一拍，TMS=0,1,0,0），
-        于是头帧占 4+head_bits+2 位。head_bits=66 时正好 72 位 = 18 组，
-        其后的同步字与数据段仍严格落在 nibble 边界上。
-        """
-        if np is None or (4 + head_bits + 2) % 4 != 0:
-            # 对不齐就退回两次传输，语义一样
-            self.shift_dr_frame(head_val, head_bits)
-            return self.shift_dr_stream(data)
-        nh = 4 + head_bits + 2
-        tms = np.zeros(nh, dtype=np.uint8)
-        tdi = np.zeros(nh, dtype=np.uint8)
-        tms[1] = 1                              # RTI(停一拍) → Select-DR
-        tms[3 + head_bits] = 1                  # 末位数据同时退到 Exit1-DR
-        tms[4 + head_bits] = 1                  # Exit1 → Update-DR
-        tdi[4:4 + head_bits] = np.unpackbits(
-            np.frombuffer(int(head_val).to_bytes((head_bits + 7) // 8, "little"),
-                          dtype=np.uint8), bitorder="little")[:head_bits]
-        zero = np.zeros(nh, dtype=np.uint8)
-        head_pl = self._pack_batch(tms, tdi, zero, nh, nh)
-
-        per = (self.max_write_bits - nh - 8) // 8
-        n = len(data)
-        pos = 0
-        while pos < n:
-            m = min(n - pos, per)
-            first = pos == 0
-            last = pos + m >= n
-            payload = ((head_pl + self._NAV4) if first else b"") \
-                + self._tdi_groups(data[pos:pos + m]) + (self._EXIT2 if last else b"")
-            nb = ((nh + 4) if first else 0) + m * 8 + (2 if last else 0)
-            if nb % 4 == 0:
-                payload += b"\x00\x00"
-                nb += 1
-            self._shift_raw(nb, payload, 0)
-            pos += m
-            per = self.max_write_bits // 8       # 后续块不再带头
-
-    def shift_dr_frame(self, value, nbits):
-        """单个短 DR 帧，不采 TDO（拼接对不齐时的退路）。"""
-        n = 3 + nbits + 2
-        tms = [0] * n
-        tms[0] = 1; tms[2 + nbits] = 1; tms[3 + nbits] = 1
-        tdi = [0, 0, 0] + [(value >> i) & 1 for i in range(nbits)] + [0, 0]
-        self.jtag_shift(tms, tdi)
 
     def shift_dr_stream(self, data):
         """一次 DR 扫描移入 len(data)*8 位纯数据（RTI 进、RTI 出，不采 TDO）。

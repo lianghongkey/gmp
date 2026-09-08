@@ -3,17 +3,9 @@
 
     python host/soc_generate.py "今天天气不错，我们去"
     python host/soc_generate.py --chat "请简单介绍一下你自己。"
-    python host/soc_generate.py --file prompt.txt --max-new 32 -v
     python host/soc_generate.py --sim "今天天气不错，我们去"
 
-开跑前查一遍板子，不对的自己修（烧 bit、灌权重）：`--no-auto` 只诊断不动手，`--check-only`
-查完就退出，`--dry-run` 只分词不碰板子。流程与排错见 `docs/usage.md`。
-
-手上没有板子时加 `--sim`：同一套流程改在 `prebuilt/sim/` 的整机仿真上跑，一步比板上慢
-几百倍，权重每趟都要重灌，见 `docs/simulation.md`。
-
-分词用 `data/tokenizer.json.gz` 里的词表，编码是本文件里的纯 Python BPE，解码按 GPT-2 的
-byte-level 表还原。`--vocab` 指到一份 GGUF 时改用 llama.cpp 的 `llama-tokenize`。
+流程、每步要多久、出错先看什么都在 `docs/usage.md`；仿真那条在 `docs/simulation.md`。
 """
 import argparse
 import codecs
@@ -40,12 +32,11 @@ from hw_params import CPU_PERIPH_BASE, CPU_GP0                      # noqa: E402
 
 DATA = os.path.join(DEV.GMP, "data")
 VOCAB_DEFAULT = os.path.join(DATA, "tokenizer.json.gz")
-#   缺省 50 MHz 那份，换 66.7 MHz 的用 `--bit`
-BIT_DEFAULT = os.path.join(DEV.GMP, "prebuilt", "bit", "top_jtag_p3.bit")
+BIT_DEFAULT = os.path.join(DEV.GMP, "prebuilt", "bit", "top_eth.bit")
 JTAG_DIR = os.path.join(DEV.GMP, "tools")
 sys.path.insert(0, JTAG_DIR)
 IDCODE_7K480T = 0x03751093          # 低 28 位；bit[31:28] 是版本号
-DECODE_CYCLES = 24_700_000          # 一步 decode 的拍数（板上 50 MHz 上 0.49 秒），估仿真要多久用
+DECODE_CYCLES = 12_184_243          # 一步 decode 的拍数（板上 50 MHz 上 0.24 秒），估仿真要多久用
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -101,8 +92,7 @@ def _bytes_to_unicode():
 
 
 TOK_NORMAL, TOK_CONTROL, TOK_USER, TOK_UNUSED = 1, 3, 4, 5
-# 3 = 控制（<|im_end|> 这类，不打印）；4 = 用户定义（<think> 这类，llama.cpp 也把它当特殊 token 整个切，
-# 但打印时原样给）；5 = 没用上的 PAD。
+# 3 = 控制（不打印）；4 = 用户定义（原样给）；5 = PAD。
 
 
 def load_vocab(path):
@@ -117,7 +107,6 @@ def load_vocab(path):
 
 class Tokenizer:
     def __init__(self, vocab_path, tokenize_bin=None):
-        #   llama-tokenize 要的是一份 GGUF，给的是摘出来的词表时它就用不上，走纯 Python BPE
         self.gguf = os.path.abspath(vocab_path) if vocab_path.endswith(".gguf") else None
         m = load_vocab(vocab_path)
         if m.get("tokenizer.ggml.model") != "gpt2":
@@ -144,7 +133,6 @@ class Tokenizer:
         if self.gguf is None:
             return None
         cands = [given, os.environ.get("LLAMA_TOKENIZE"), shutil.which("llama-tokenize")]
-        # GGUF 多半就放在 llama.cpp 的 build/bin 下面
         d = os.path.dirname(os.path.realpath(self.gguf))
         for _ in range(6):
             cands.append(os.path.join(d, "llama-tokenize"))
@@ -169,9 +157,7 @@ class Tokenizer:
             raise RuntimeError(f"llama-tokenize 没输出 id 列表：{r.stdout[-200:]!r}")
         return json.loads(line)
 
-    # 纯 Python 退路。llama.cpp 里 qwen2 那条 pre-tokenizer 正则是
-    #   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-    # `re` 没有 \p{L} / \p{N}，用 [^\W\d_] 与 \d 顶替（差别只在 Ⅻ / ½ 这类 Nl / No 字符）。
+    # 纯 Python 退路。`re` 没有 \p{L} / \p{N}，用 [^\W\d_] 与 \d 顶替。
     _L = r"[^\W\d_]"
     _N = r"\d"
     _PRE = re.compile(
@@ -268,7 +254,7 @@ class Board:
     def __init__(self, tr):
         self.tr = tr
         self.soc = DEV.Soc(tr)
-        #   仿真那条通路能直接读写 DRAM 模型，搬字节都走它；板上只有经片上互联这一条
+        #   仿真能直接读写 DRAM 模型，搬字节都走它
         self.back = getattr(tr, "dram_preload", None) is not None
 
     def put(self, addr, data):
@@ -325,80 +311,81 @@ def load_weights(bd, w, stop=None):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 开跑前的板子检查：线缆 → IDCODE → 魔数 → 读 burst → DDR 校准；不对的自己修
+# 开跑前的板子检查：1GbE 链路 → 魔数 → DDR 校准；不对的经线缆烧一遍 bit
 # ══════════════════════════════════════════════════════════════════════════
 
 class BoardNotReady(SystemExit):
     pass
 
 
-def _procs():
-    out = subprocess.run(["ps", "-eo", "pid,comm"], capture_output=True, text=True).stdout
-    res = []
-    for ln in out.splitlines()[1:]:
-        f = ln.split(None, 1)
-        if len(f) == 2:
-            res.append((int(f[0]), f[1].strip()))
-    return res
+def reexec_with_cap_net_raw(argv):
+    """没有 CAP_NET_RAW 就经 `host/ethaxi/build/ethaxi_run` 重新起一遍自己。"""
+    if os.environ.get("GMP_ETHAXI_REEXEC"):
+        return
+    cap = 0
+    with open("/proc/self/status") as f:
+        for ln in f:
+            if ln.startswith("CapEff:"):
+                cap = int(ln.split()[1], 16)
+    if cap >> 13 & 1:                                   # CAP_NET_RAW = 13
+        return
+    run = os.path.join(HERE, "ethaxi", "build", "ethaxi_run")
+    if not os.access(run, os.X_OK):
+        raise SystemExit(f"走 1GbE 要 {run}：先 make -C host/ethaxi，"
+                         "再 sudo setcap cap_net_raw+eip 到它上面（一次性，见 docs/setup.md）")
+    os.environ["GMP_ETHAXI_REEXEC"] = "1"
+    os.execv(run, [run, sys.executable, os.path.abspath(__file__)] + list(argv))
 
 
-def _open_cable():
-    """打开线缆。报 `Resource busy` 时先清掉占着 USB 的残留 hw_server；vivado 进程
-    本身还在跑就不动它。"""
-    import usb.core
-    from pyjtag.xpc import XpcError
-    for attempt in (1, 2):
+def pick_nic(given):
+    """选接板子的那块网口：`--nic` > 环境变量 `GMP_NIC` > 本机唯一一块 link up 的实体网口。"""
+    if given:
+        return given
+    env = os.environ.get("GMP_NIC")
+    if env:
+        return env
+    root = "/sys/class/net"
+    cand = []
+    for name in sorted(os.listdir(root)):
+        if not os.path.exists(os.path.join(root, name, "device")):
+            continue
         try:
-            return DEV.BscanAxiTransport()
-        except usb.core.USBError as e:
-            busy = getattr(e, "errno", None) == 16 or "busy" in str(e).lower()
-            if not busy or attempt == 2:
-                raise BoardNotReady(f"线缆打不开：{e}")
-            hw = [p for p, c in _procs() if c == "hw_server"]
-            viv = [p for p, c in _procs() if c.startswith("vivado")]
-            if viv:
-                raise BoardNotReady(f"线缆被占用，vivado（pid {viv}）还在跑，等它退出或关掉再来")
-            if not hw:
-                raise BoardNotReady(f"线缆被占用（{e}），但没看到 hw_server —— 看看谁在用 03fd 设备")
-            print(f"    线缆被残留的 hw_server（pid {hw}）占着，kill -9 后重试")
-            for p in hw:
-                try:
-                    os.kill(p, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            time.sleep(2)
-        except XpcError as e:
-            raise BoardNotReady(f"线缆不正常：{e}")
+            with open(os.path.join(root, name, "operstate")) as f:
+                if f.read().strip() != "up":
+                    continue
+        except OSError:
+            continue
+        cand.append(name)
+    if len(cand) == 1:
+        return cand[0]
+    raise SystemExit(f"挑不出接板子的网口（link up 的实体网口：{cand or '一块也没有'}）："
+                     "用 --nic 指一块，或把它写进环境变量 GMP_NIC")
 
 
-def _reselect_user1(tr):
-    """读 IDCODE 或烧录之后要重新选一次 JTAG 用户链。"""
-    from pyjtag import BscanAxi
-    tr._axi = BscanAxi(tr._axi.tap)
+class Cable:
+    """一根打开着的 JTAG 线缆，只用来烧 bitstream。"""
+
+    def __init__(self):
+        from pyjtag import XpcCable, Tap
+        try:
+            self.cable = XpcCable()
+        except Exception as e:
+            raise BoardNotReady(f"线缆打不开：{e}")
+        self.tap = Tap(self.cable)
+
+    def close(self):
+        self.cable.close()
 
 
 def _magic_ok(soc):
-    from pyjtag.bscan import BscanAxiError
+    """读 STAT 的魔数。链路刚起来时读不回来算不认，不是异常。"""
     try:
         return soc.stat_rd(DEV.STAT_MAGIC) == DEV.SOC_MAGIC
-    except BscanAxiError:
+    except Exception:
         return False
 
 
-def _rburst_ok(tr):
-    """读 burst 能读回逐笔写进去的图案 = 板上这条通路支持它。探针写在搬运缓冲上。"""
-    from pyjtag.bscan import BscanAxiError
-    pat = [0x5A5A0000 + i * 0x01010101 for i in range(8)]
-    try:
-        tr.write32_many([(DEV.WIN_XFER_BUF << 24 | (i << 2), v) for i, v in enumerate(pat)])
-        one = [tr.read32(DEV.WIN_XFER_BUF << 24 | (i << 2)) for i in range(8)]
-        many = tr.read_burst(DEV.WIN_XFER_BUF << 24, 8)
-        return one == pat and list(many) == pat
-    except BscanAxiError:
-        return False
-
-
-def _program_pyjtag(tr, bit):
+def _program_pyjtag(cab, bit):
     from pyjtag.fpga import program_bit
     last = [-1]
 
@@ -409,87 +396,71 @@ def _program_pyjtag(tr, bit):
             print(f"      … {pct}%")
 
     t0 = time.time()
-    info, done, ircap = program_bit(tr.cable, tr._axi.tap, bit, progress=progress)
+    info, done, _ircap = program_bit(cab.cable, cab.tap, bit, progress=progress)
     print(f"    pyjtag 烧 {os.path.basename(bit)}（{info.get('design')} / {info.get('part')} "
           f"{info.get('date')} {info.get('time')}）：DONE={int(done)}，{time.time() - t0:.0f} s")
-    _reselect_user1(tr)
     return done
 
 
-def _program_vivado(tr, bit):
-    """走 `tools/program.tcl` 烧录：vivado 期间独占 JTAG，先把线缆放掉，它退出后清掉
-    残留的 hw_server。返回重新打开的 transport。"""
-    tr.close()
-    t0 = time.time()
-    env = dict(os.environ, BIT=os.path.abspath(bit))
-    r = subprocess.run(["vivado", "-mode", "batch", "-notrace", "-source",
-                        os.path.join(DEV.GMP, "tools", "program.tcl"),
-                        "-log", os.path.join(DEV.BUILD, "prog.log"),
-                        "-journal", os.path.join(DEV.BUILD, "prog.jou")],
-                       capture_output=True, text=True, timeout=600, env=env)
-    tail = (r.stdout + r.stderr).strip().splitlines()[-3:]
-    print(f"    vivado 烧 {os.path.basename(bit)}：exit {r.returncode}，{time.time() - t0:.0f} s"
-          + ("" if r.returncode == 0 else "\n      " + "\n      ".join(tail)))
-    for p, c in _procs():
-        if c == "hw_server":
-            try:
-                os.kill(p, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    time.sleep(3)
-    if r.returncode:
-        raise BoardNotReady("vivado 烧录失败")
-    return _open_cable()
+def _program_via_jtag(a):
+    """查 IDCODE、烧 `--bit`、关掉。读写走 1GbE，不走线缆。"""
+    from pyjtag.fpga import read_idcode
+    if not os.path.isfile(a.bit):
+        raise BoardNotReady(f"找不到 {a.bit}")
+    cab = Cable()
+    print(f"    线缆：firmware 0x{cab.cable.firmware_version:04x}，"
+          f"cpld 0x{cab.cable.cpld_version:04x}")
+    idc = read_idcode(cab.tap)
+    if (idc & 0x0FFFFFFF) != IDCODE_7K480T:
+        cab.close()
+        raise BoardNotReady(f"IDCODE 读到 0x{idc:08x}，不是 xc7k480t：板子没上电？JTAG 排线 / VREF？"
+                            "（软件修不了）")
+    if not _program_pyjtag(cab, a.bit):
+        cab.close()
+        raise BoardNotReady("烧完 DONE 没拉起来")
+    cab.close()
+
+
+def _open_eth(a, tries=1):
+    """开 1GbE 链路。刚烧完 bit 时收发两侧要重新对齐，给它几秒。"""
+    last = None
+    for i in range(tries):
+        try:
+            return DEV.EthAxiTransport(a.nic)
+        except Exception as e:                  # 链路 down、网口不在、模块没编
+            last = e
+            if i + 1 < tries:
+                time.sleep(1.0)
+    raise BoardNotReady(f"1GbE 链路开不起来（网口 {a.nic}）：{last}")
 
 
 def open_board(a):
     """按阶梯查一遍并修；返回 (transport, 这次有没有重烧)。"""
-    from pyjtag.fpga import read_idcode
-    tr = _open_cable()
-    cab = tr.cable
-    print(f"    线缆：firmware 0x{cab.firmware_version:04x}，cpld 0x{cab.cpld_version:04x}")
-    idc = read_idcode(tr._axi.tap)
-    _reselect_user1(tr)
-    if (idc & 0x0FFFFFFF) != IDCODE_7K480T:
-        tr.close()
-        raise BoardNotReady(f"IDCODE 读到 0x{idc:08x}，不是 xc7k480t：板子没上电？JTAG 排线 / VREF？"
-                            "（软件修不了）")
-    soc = DEV.Soc(tr)
-    why = None
-    if a.program:
-        why = "--program"
-    elif not _magic_ok(soc):
-        why = "STAT 魔数读不到或不是 SOC1（没烧，或烧的不是这个 SoC）"
-    elif not a.no_burst and not _rburst_ok(tr):
-        why = "桥没有读 burst（旧 bit）"
+    tr, why = None, ("--program" if a.program else None)
+    if not why:
+        try:
+            tr = _open_eth(a)
+        except BoardNotReady as e:
+            why = str(e)
+        else:
+            if not _magic_ok(DEV.Soc(tr)):
+                why = "STAT 魔数读不到或不是 SOC1（没烧，或烧的不是这个 SoC）"
     programmed = False
     if why:
         print(f"    要重烧：{why} → {a.bit}")
+        if tr is not None:
+            tr.close()
+            tr = None
         if a.no_auto:
-            tr.close()
             raise BoardNotReady(f"--no-auto：不动手。去掉它会烧 {a.bit}")
-        if not os.path.isfile(a.bit):
-            tr.close()
-            raise BoardNotReady(f"找不到 {a.bit} —— 先 make bit-board")
-        ok = False
-        if a.prog_tool == "pyjtag":
-            ok = _program_pyjtag(tr, a.bit)
-            if not ok:
-                print("    pyjtag 烧完 DONE=0，改用 vivado 再烧一次")
-        if not ok:
-            tr = _program_vivado(tr, a.bit)
-            soc = DEV.Soc(tr)
+        _program_via_jtag(a)
         programmed = True
-        for _ in range(50):
-            if _magic_ok(soc):
-                break
-            time.sleep(0.1)
-        else:
+        tr = _open_eth(a, tries=20)
+        if not _magic_ok(DEV.Soc(tr)):
             tr.close()
-            raise BoardNotReady("烧完 STAT 魔数还是不对：这份 bit 不是 gmp soc？")
-        print("    板上认出这颗 SoC")
-    else:
-        print("    板上认出这颗 SoC" + ("" if a.no_burst else "，读写通路一致"))
+            raise BoardNotReady("烧完 STAT 魔数还是不对：这份 bit 不是这颗 SoC？")
+    print("    板上认出这颗 SoC")
+    soc = DEV.Soc(tr)
     t0 = time.time()
     while not soc.stat_rd(DEV.STAT_BOARD) & 1:
         if time.time() - t0 > 30:
@@ -503,7 +474,7 @@ def open_board(a):
 def open_sim(a):
     """起仿真、连上、看它认不认这颗 SoC。返回 (transport, 有没有重烧)，仿真没有烧录这一步。"""
     try:
-        tr = DEV.SimSockTransport(bin_path=a.sim_bin, sock_path=a.sim_sock)
+        tr = DEV.SimSockTransport(sock_path=a.sim_sock)
     except IOError as e:
         raise BoardNotReady(f"仿真起不来：{e}")
     print(f"    仿真起来了：{os.path.relpath(tr.bin, DEV.GMP)}（pid {tr.proc.pid}），"
@@ -530,13 +501,13 @@ def open_sim(a):
 
 
 def ensure_weights(a, bd, w, programmed, stop=None):
-    hint = getattr(bd.tr, "load_hint", "约 18 分钟")
+    hint = getattr(bd.tr, "load_hint", "要一会儿")
     if a.load_weights:
         print(f"── 灌整份权重（{RT.WEIGHTS_BYTES / 2**20:.0f} MiB，{hint}）──")
         load_weights(bd, w, stop)
     if not a.check_weights:
         return
-    bad = check_weights(bd, w, a.check_weights, a.seed, a.verbose)
+    bad = check_weights(bd, w, a.check_weights, 0, a.verbose)
     if not bad:
         print(f"    权重抽查 {a.check_weights} 处一致")
         return
@@ -546,9 +517,9 @@ def ensure_weights(a, bd, w, programmed, stop=None):
         raise BoardNotReady(f"--no-auto：不灌。去掉它会整份重灌（{hint}）")
     print(f"── 整份重灌权重（{RT.WEIGHTS_BYTES / 2**20:.0f} MiB，{hint}）──")
     load_weights(bd, w, stop)
-    bad = check_weights(bd, w, a.check_weights, a.seed + 1, a.verbose)
+    bad = check_weights(bd, w, a.check_weights, 1, a.verbose)
     if bad:
-        raise BoardNotReady(f"灌完抽查仍有 {len(bad)} 处不一致：JTAG 数据通路有问题，别往下跑")
+        raise BoardNotReady(f"灌完抽查仍有 {len(bad)} 处不一致：搬运通路有问题，别往下跑")
     print(f"    灌完再抽查 {a.check_weights} 处一致")
 
 
@@ -579,36 +550,34 @@ def main():
     ap.add_argument("--tokenize-bin", default=None, help="llama-tokenize 的路径（缺省自己找，找不到用纯 Python）")
     ap.add_argument("--max-new", type=int, default=0, help="最多生成几个 token（0 = 把 128 的上下文用满）")
     ap.add_argument("--no-stop", action="store_true", help="遇到 <|im_end|> / <|endoftext|> 也不停")
-    ap.add_argument("--feed-only", action="store_true",
-                    help="调试：满 64 也不走 prefill，整段 prompt 逐个用 decode 喂（慢 64 倍，"
-                         "用来把 prefill 路径与 decode 路径在同一块板上对照）")
     ap.add_argument("--no-zero", action="store_true", help="不清上一趟的残留")
     ap.add_argument("--check-weights", type=int, default=16, help="抽查几处权重（0 = 不查）")
-    ap.add_argument("--load-weights", action="store_true", help="不抽查，直接把整份权重灌进 DRAM（18 分钟）")
+    ap.add_argument("--load-weights", action="store_true", help="不抽查，直接把整份权重灌进 DRAM")
+    ap.add_argument("--nic", default=None,
+                    help="接板子的那块网口；不给就取环境变量 GMP_NIC，再不给就挑本机唯一一块 link up 的实体网口")
     ap.add_argument("--bit", default=BIT_DEFAULT,
-                    help="要烧的 bit（板上没烧 / 不是这个 SoC / 旧桥时）；缺省 prebuilt/bit/top_jtag_p3.bit")
+                    help="要烧的 bit（板上没烧 / 不是这个 SoC 时）；缺省 prebuilt/bit/top_eth.bit")
     ap.add_argument("--program", action="store_true", help="不管板上是什么，先烧一遍 --bit")
-    ap.add_argument("--prog-tool", choices=("pyjtag", "vivado"), default="pyjtag",
-                    help="烧录走 pyjtag 的 program_bit（缺省）还是 vivado 的 tools/program.tcl")
     ap.add_argument("--no-auto", action="store_true", help="板子不对时只诊断，不烧 bit、不灌权重")
     ap.add_argument("--check-only", action="store_true", help="板子与权重查完（该修的修完）就退出，不生成")
     ap.add_argument("--max-wall", type=float, default=None,
                     help="每轮的墙钟超时（秒；缺省板上 120，仿真 7200）")
     ap.add_argument("--sim", action="store_true",
                     help="不接板子，在 prebuilt/sim/ 的整机仿真上跑（慢，见 docs/simulation.md）")
-    ap.add_argument("--sim-bin", default=None, help="换一份仿真可执行文件")
     ap.add_argument("--sim-sock", default=None,
                     help="仿真的 unix socket 路径（缺省 /tmp/gmp_soc_axi.sock，同时跑几份要各给一个）")
-    ap.add_argument("--no-burst", action="store_true", help="不用 JTAG burst")
     ap.add_argument("--show-special", action="store_true", help="控制 token 也打印出来（放在〈〉里）")
     ap.add_argument("--dry-run", action="store_true", help="只分词、只算计划，不碰板子")
-    ap.add_argument("--seed", type=int, default=0, help="抽查权重用的随机种子")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
     if a.max_wall is None:
         a.max_wall = 7200.0 if a.sim else 120.0
     if a.sim and a.program:
         ap.error("--sim 下没有烧录这一步（仿真里就是这颗 SoC）")
+    if not a.sim and not a.dry_run:
+        a.nic = pick_nic(a.nic)
+        #   拿 CAP_NET_RAW 要换个进程重跑，趁分词还没开始
+        reexec_with_cap_net_raw(sys.argv[1:])
 
     if a.file:
         text = open(a.file, encoding="utf-8").read()
@@ -634,15 +603,14 @@ def main():
         sys.exit("prompt 分出来是空的")
     if P > n_ctx:
         sys.exit(f"prompt {P} 个 token，上下文上限 {n_ctx}（decode 的 n_seq_hi）")
-    use_pre = P >= n_pre and not a.feed_only
+    use_pre = P >= n_pre
     feed = list(range(n_pre + 1, P + 1)) if use_pre else list(range(1, P + 1))
-    # decode(k) 写第 k 格：喂 prompt 时 k 走到 P 为止（decode(P) 算出来的才是第一个生成的）
     room = n_ctx - P + 1                 # decode(k) 最大到 k = n_ctx，写第 n_ctx 格
     n_new = room if a.max_new <= 0 else min(a.max_new, room)
     stops = set() if a.no_stop else {t for t in (tk.eos, tk.bos) if t is not None}
     plan = (f"prefill({n_pre}) + 逐个喂 {len(feed)} 个（decode n_seq = {n_pre + 1}..{P}）" if use_pre and feed
             else f"prefill({n_pre})" if use_pre
-            else f"{'--feed-only' if a.feed_only else f'不满 {n_pre}'}，逐个喂 {P} 个（decode n_seq = 1..{P}）")
+            else f"不满 {n_pre}，逐个喂 {P} 个（decode n_seq = 1..{P}）")
     print(f"    计划：{plan}，然后最多生成 {n_new} 个（上下文 {n_ctx}）；"
           f"停在 {sorted(stops) if stops else '不停'}")
     if a.dry_run:
@@ -651,12 +619,6 @@ def main():
         return 0
 
     # ── 板子 ──
-    if a.no_burst:
-        os.environ.pop("JTAG_BURST", None)
-        os.environ.pop("JTAG_RBURST", None)
-    else:
-        os.environ.setdefault("JTAG_BURST", "1")
-        os.environ.setdefault("JTAG_RBURST", "1")
     stop = Stopper()
     if a.sim:
         print("── 仿真 ──")
@@ -666,12 +628,10 @@ def main():
         tr, programmed = open_board(a)
     bd = Board(tr)
     soc = bd.soc
-    #   仿真的 DRAM 活在进程里，起一趟空一趟，权重每次都得重灌（走后门，比板上快）
-    if a.sim and a.check_weights and not a.load_weights:
+    #   仿真的 DRAM 活在进程里，起一趟空一趟，要生成就必须先灌权重
+    if a.sim and not a.load_weights and not (a.check_only and not a.check_weights):
         a.load_weights = True
     ensure_weights(a, bd, w, programmed, stop)
-    if a.sim and not a.load_weights and not a.check_only:
-        print("    （--check-weights 0：这趟没灌权重，DRAM 模型是空的，生成出来的东西不作数）")
     if a.check_only:
         print("    --check-only：到此为止")
         tr.close()
@@ -700,7 +660,7 @@ def main():
         for base, nb in RT.ARENA:
             bd.put(base, bytes(nb))
             tot += nb
-        print(f"    清零：{len(blocks) + len(RT.ARENA)} 段，"
+        print(f"    清零：KV 每层前 {n_slot} 格 × {len(blocks)} 块 + 中间张量 {len(RT.ARENA)} 段，"
               f"共 {tot / 2**20:.1f} MiB，{time.time() - t0:.0f} s")
 
     # ── 让 CPU 开始跑 ──
@@ -736,8 +696,7 @@ def main():
             print(f"    {what}：n_seq = {k} → token[{k}] = {t} {tk.decode([t])!r}（{cyc} 拍，{wall:.2f} s）")
         return t, wall
 
-    # 1. 把 prompt 送进去。每一轮都把算出的 token 写到串上第 k 格，k < P 时那一格本该是
-    #    prompt 自己的第 k 个 token，被盖掉了要立刻写回去，下一轮读的才是 prompt。
+    # 1. 把 prompt 送进去。每一轮算出的 token 会盖掉串上第 k 格，k < P 时要立刻写回去。
     t_feed0 = time.time()
     hits = guesses = 0
     pre_wall = 0.0
