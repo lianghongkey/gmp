@@ -32,10 +32,10 @@ host-side driver.
 
 A recording of one run on the board:
 
-<video src="demo/chat.mov" controls muted playsinline width="880"></video>
+![1.00](demo/chat.gif)
 
-If the player does not render, open [`demo/chat.mov`](demo/chat.mov) directly. The line-by-line
-terminal transcript is in [`docs/usage.md`](docs/usage.md) (in Chinese, as the tool is).
+The line-by-line terminal transcript is in [`docs/usage.md`](docs/usage.md) (in Chinese, as the
+tool is).
 
 The same prompts, compared token for token against llama.cpp doing greedy decoding from the same
 GGUF:

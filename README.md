@@ -29,10 +29,9 @@ bitstream，以及主机侧驱动。
 
 板上跑一趟的录像：
 
-<video src="demo/chat.mov" controls muted playsinline width="880"></video>
+![1.00](demo/chat.gif)
 
-播放器渲染不出来时直接看 [`demo/chat.mov`](demo/chat.mov)。逐行的终端实录在
-[`docs/usage.md`](docs/usage.md)。
+逐行的终端实录在 [`docs/usage.md`](docs/usage.md)。
 
 同一段话，与 llama.cpp 用同一份 GGUF 做贪心解码的结果逐字对照：
 
@@ -95,7 +94,9 @@ DRAM 带宽，架构因此围绕带宽设计，而非堆叠算力。更换模型
 4. 根据所有的详细的设计，逐步完成每个环节，最终优化到理想的状态。
 5. 端到端针对算法模型设计完整的芯片。
 
-这颗芯片落在 3.5。从一个模块走到一颗端到端推理芯片，差的并不是模型写得更好，差的是每一步
+**这个项目落在 3.5**
+
+从一个模块走到一颗端到端推理芯片，差的并不是模型写得更好，差的是每一步
 做得对不对，由谁来判断。
 
 ## 开发方式
