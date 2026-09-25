@@ -18,4 +18,5 @@ CPU_GO = 0x7C0
 CPU_GP0 = 0x7D0
 
 HOST_PORT = 3
+HOST_BEAT = 128                 # host 口一个 beat 的字节数（片上数据通路 1024 位）
 IMAGE_BASE = 0x0310_0000

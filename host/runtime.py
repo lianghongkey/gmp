@@ -8,7 +8,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from hw_params import CPU_PERIPH_BASE, CPU_GP0, IMAGE_BASE          # noqa: E402
+from hw_params import CPU_PERIPH_BASE, CPU_GP0, IMAGE_BASE, HOST_BEAT   # noqa: E402
 
 DATA = os.path.join(os.path.dirname(HERE), "data")
 WEIGHTS_NPZ = os.path.join(DATA, "weights.npz")
@@ -23,10 +23,8 @@ KV_BASE, KV_LAYERS = 0x00349AC000, 28
 KV_LAYER_STRIDE, KV_KV_GAP = 0x400000, 0x200000
 KV_SLOT, KV_MAX_CTX = 2048, 1024
 
-# 每轮要清掉的几块中间张量：(地址, 字节数)
-ARENA = [(0x003BDAC000, 2048), (0x003BDAC800, 2048), (0x003BDAD000, 4096),
-         (0x003BDAD800, 6144), (0x003BDAE000, 2048), (0x003BDAE800, 2048),
-         (0x003BDAF000, 4096), (0x003BDB0800, 6144)]
+# 每轮要清掉的中间张量：[起, 止) 整段。只按张量表清会漏掉复用同一地址的大张量没写过的行
+ARENA_LO, ARENA_HI = 0x003BDAC000, 0x003BF2C000
 
 # ══ 与 CPU 的口径 ═════════════════════════════════════════════════════════
 SID_STOP, SID_PREFILL, SID_DECODE = 0, 1, 2
@@ -69,12 +67,19 @@ _CHUNK = 16 << 10
 
 
 def dram_put(tr, soc, addr, data):
-    if addr % 64 or len(data) % 64:
-        # 首尾两个不完整的块先读回来、改掉要改的几个字节、再整块写回去
-        lo = addr & ~0x3F
-        hi = (addr + len(data) + 63) & ~0x3F
-        buf = bytearray(dram_get(tr, soc, lo, hi - lo))
-        buf[addr - lo:addr - lo + len(data)] = data
+    nb = HOST_BEAT
+    if addr % nb or len(data) % nb:
+        # 首尾两个不完整的 beat 先读回来、改掉要改的几个字节、再整 beat 写回去。
+        #   只读首尾：整段读回会读到上电以来没写过的 line，板上 DDR3 的 ECC 会报多位错
+        lo = addr - addr % nb
+        hi = -(-(addr + len(data)) // nb) * nb
+        end = addr + len(data)
+        buf = bytearray(hi - lo)
+        if addr % nb:
+            buf[:nb] = dram_get(tr, soc, lo, nb)
+        if end % nb:
+            buf[hi - nb - lo:] = dram_get(tr, soc, hi - nb, nb)
+        buf[addr - lo:end - lo] = data
         addr, data = lo, bytes(buf)
     pad = (-len(data)) % 4
     if pad:

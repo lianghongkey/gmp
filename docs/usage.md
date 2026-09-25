@@ -16,35 +16,37 @@ python host/soc_generate.py --chat "请用一句话介绍一下你自己。"
 python host/soc_generate.py --file prompt.txt --max-new 32 -v
 ```
 
-第一次跑（板子刚上电、里面什么都没有）它会自己烧 bitstream、灌权重，两分钟上下；之后每次
+第一次跑（板子刚上电、里面什么都没有）它会自己烧 bitstream、灌权重，一分钟上下；之后每次
 再跑只花几秒钟把板子查一遍，然后直接开始生成。生成过程是逐 token 打印的。
 
 `--chat` 按 Qwen3 的对话模板包一层，不加就是纯续写。
 
 ## 跑起来是什么样
 
-2026-09-08 的一趟实录。板上已经烧着这份 bitstream，这一趟把 762 MiB 权重整份重灌了一遍：
+2026-09-25 的一趟实录。板上已经烧着这份 bitstream，这一趟把 762 MiB 权重整份重灌了一遍：
 
 ```text
 $ python host/soc_generate.py --load-weights --chat "请用一句话介绍一下你自己。"
 ── Qwen3 0.6B Instruct：prompt 18 个 token（纯 Python BPE）──
     计划：不满 64，逐个喂 18 个（decode n_seq = 1..18），然后最多生成 111 个（上下文 128）；停在 [151643, 151645]
 ── 板子 ──
+[ethaxi] 网口 enx9cebe8e915b5（9c:eb:e8:e9:15:b5）link UP
     板上认出这颗 SoC
     DDR 校准完成
 ── 灌整份权重（762 MiB，约 1 分钟）──
-      … 158 MiB（17.35 MB/s，还要约 1 分钟）
+      … 158 MiB（21.29 MB/s，还要约 0 分钟）
       …（每 64 MiB 报一行）
-      … 762 MiB（17.33 MB/s，还要约 0 分钟）
-    权重 761.7 MiB 灌完，0.7 分钟
+      … 762 MiB（21.26 MB/s，还要约 0 分钟）
+    权重 761.7 MiB 灌完，0.6 分钟
     权重抽查 16 处一致
-    清零：KV 每层前 128 格 × 56 块 + 中间张量 8 段，共 14.0 MiB，1 s
+    … 已灌 1 MiB（21925 KB/s）
+    清零：KV 每层前 128 格 × 56 块 + 中间张量 1536 KiB，共 15.5 MiB，1 s
     CPU 报到，程序版本 1
-    逐个喂 18 个：4.4 s
+    逐个喂 18 个：1.6 s
     （吃 prompt 时片上 top1 猜中下一个 token 6/17 次）
 ── 生成 ──
 我是AI助手，专注于帮助用户解决问题和提供支持。
-── 生成 13 个 token（遇到停止 token），decode 平均 0.24 s/步 ──
+── 生成 13 个 token（遇到停止 token），decode 平均 0.087 s/步，11.441 token/s ──
 ```
 
 ## 这条命令做的六件事
@@ -75,7 +77,7 @@ $ python host/soc_generate.py --load-weights --chat "请用一句话介绍一下
 
 ### 三、灌权重
 
-权重共 762 MiB，经网口写进片上，再由片上互联搬进 DDR3，实测约 10 MB/s，一分多钟。灌完再抽查一次。
+权重共 762 MiB，经网口写进片上，再由片上互联搬进 DDR3，实测约 21 MB/s，半分多钟。灌完再抽查一次。
 
 只要板子不掉电、不重灌别的东西，权重一直在 DRAM 里，后面每次跑都跳过这一步。`--load-weights`
 是不抽查直接重灌。
@@ -83,14 +85,14 @@ $ python host/soc_generate.py --load-weights --chat "请用一句话介绍一下
 ### 四、清残留
 
 这一趟会碰到的 DRAM 区域里，输入没有覆盖到的部分要清零：KV cache 每层前 128 格乘 56 块，加上
-中间张量的 8 段，共 14 MiB，一秒钟。上一趟留下的残留会被读进来影响结果。`--no-zero` 跳过。
+中间张量那一整段 1.5 MiB，共 15.5 MiB，一秒钟。上一趟留下的残留会被读进来影响结果。`--no-zero` 跳过。
 
 ### 五、把 prompt 喂进去
 
 板上那份程序编好了两条路：
 
-* **prefill** 一次处理 64 个 token，prompt 到 64 个及以上时走它，一轮 1.10 秒。
-* **decode** 一次处理一个 token，一步 0.24 秒。prompt 里 prefill 处理不完的那些就靠它逐个喂
+* **prefill** 一次处理 64 个 token，prompt 到 64 个及以上时走它，一轮 0.65 秒。
+* **decode** 一次处理一个 token，一步 0.088 秒。prompt 里 prefill 处理不完的那些就靠它逐个喂
   （不满 64 个的 prompt 整段都这么喂，不能补零凑数）。
 
 prompt 加生成一共最多 128 个 token，这是这份产物的上限。

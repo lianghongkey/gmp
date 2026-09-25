@@ -36,7 +36,7 @@ BIT_DEFAULT = os.path.join(DEV.GMP, "prebuilt", "bit", "top_eth.bit")
 JTAG_DIR = os.path.join(DEV.GMP, "tools")
 sys.path.insert(0, JTAG_DIR)
 IDCODE_7K480T = 0x03751093          # 低 28 位；bit[31:28] 是版本号
-DECODE_CYCLES = 12_184_243          # 一步 decode 的拍数（板上 50 MHz 上 0.24 秒），估仿真要多久用
+DECODE_CYCLES = 6_940_712           # 一步 decode 的拍数（板上 80 MHz 上 0.088 秒），估仿真要多久用
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -657,10 +657,9 @@ def main():
         for base, slot in blocks:
             bd.put(base, bytes(slot * n_slot))
             tot += slot * n_slot
-        for base, nb in RT.ARENA:
-            bd.put(base, bytes(nb))
-            tot += nb
-        print(f"    清零：KV 每层前 {n_slot} 格 × {len(blocks)} 块 + 中间张量 {len(RT.ARENA)} 段，"
+        bd.put(RT.ARENA_LO, bytes(RT.ARENA_HI - RT.ARENA_LO))
+        tot += RT.ARENA_HI - RT.ARENA_LO
+        print(f"    清零：KV 每层前 {n_slot} 格 × {len(blocks)} 块 + 中间张量 {(RT.ARENA_HI - RT.ARENA_LO) >> 10} KiB，"
               f"共 {tot / 2**20:.1f} MiB，{time.time() - t0:.0f} s")
 
     # ── 让 CPU 开始跑 ──
@@ -693,7 +692,7 @@ def main():
             raise RuntimeError(f"{what}：CPU 拒了这一轮（n_seq = {k}）")
         t = bd.get_i32(c_base + 4 * k)
         if a.verbose:
-            print(f"    {what}：n_seq = {k} → token[{k}] = {t} {tk.decode([t])!r}（{cyc} 拍，{wall:.2f} s）")
+            print(f"    {what}：n_seq = {k} → token[{k}] = {t} {tk.decode([t])!r}（{cyc} 拍，{wall:.3f} s）")
         return t, wall
 
     # 1. 把 prompt 送进去。每一轮算出的 token 会盖掉串上第 k 格，k < P 时要立刻写回去。
@@ -751,8 +750,9 @@ def main():
         why = "到 --max-new"
     else:
         why = f"上下文 {n_ctx} 用满"
-    print(f"── 生成 {len(out_ids)} 个 token（{why}），decode 平均 "
-          f"{(sum(walls) / len(walls)) if walls else 0:.2f} s/步 ──")
+    avg = sum(walls) / len(walls) if walls else 0.0
+    rate = f"，{1 / avg:.3f} token/s" if avg > 0 else ""
+    print(f"── 生成 {len(out_ids)} 个 token（{why}），decode 平均 {avg:.3f} s/步{rate} ──")
     if a.verbose:
         print(f"    {out_ids}")
 

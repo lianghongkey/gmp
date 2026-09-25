@@ -23,7 +23,7 @@ sys.path.insert(0, HERE)
 from hw_params import (WIN_CPU, WIN_XFER, WIN_XFER_BUF, WIN_STAT,  # noqa: E402
                        SOC_MAGIC, STAT_MAGIC, STAT_CYCLES, STAT_CPU_TRACE,  # SOC_MAGIC 转给 soc_generate
                        STAT_CPU_STATE, STAT_BOARD,
-                       CPU_PERIPH_BASE, CPU_GO, HOST_PORT)
+                       CPU_PERIPH_BASE, CPU_GO, HOST_PORT, HOST_BEAT)
 
 def _hex(v):
     return f"0x{v & 0xFFFFFFFF:08x}"
@@ -283,19 +283,20 @@ class Soc:
         return self.tr.read32(WIN_XFER_BUF << 24 | (widx << 2))
 
     # ── DRAM 批量搬运 ──
-    BUF_BEATS = 256
-    CMD_BEATS = 255
+    #   数据缓冲 16 KiB，按 beat（`HOST_BEAT`）计格；一条命令最多 255 beat
+    BUF_BEATS = (16 << 10) // HOST_BEAT
+    CMD_BEATS = min(255, BUF_BEATS)
 
     @staticmethod
     def _row_beats(addr, nbytes):
-        return ((addr & 0x3F) + nbytes + 63) // 64
+        return ((addr % HOST_BEAT) + nbytes + HOST_BEAT - 1) // HOST_BEAT
 
     @staticmethod
     def _split(addr, nbytes):
         """把 [addr, addr+nbytes) 切成每条 ≤ CMD_BEATS beat 的子命令。"""
         subs, off, a, left = [], 0, addr, nbytes
         while left > 0:
-            room = Soc.CMD_BEATS * 64 - (a & 0x3F)         # 这条从 a 起最多能覆盖的字节数
+            room = Soc.CMD_BEATS * HOST_BEAT - (a % HOST_BEAT)   # 这条从 a 起最多能覆盖的字节数
             n = min(left, room)
             beats = Soc._row_beats(a, n)
             subs.append((a, n, beats, off))
@@ -354,9 +355,9 @@ class Soc:
     _DIRTY = b"".join((0xDEAD0000 + i).to_bytes(4, "little") for i in range(4096))
 
     def dram_write(self, addr, data):
-        """data 是 bytes（4 字节对齐，≤ 16 KiB），起始地址 64 字节对齐。"""
+        """data 是 bytes（4 字节对齐，≤ 16 KiB），起始地址 `HOST_BEAT` 字节对齐。"""
         assert len(data) % 4 == 0 and len(data) <= 16 << 10
-        assert addr % 64 == 0, f"dram_write 的起始地址要 64 字节对齐，给的是 {_hex(addr)}"
+        assert addr % HOST_BEAT == 0, f"dram_write 的起始地址要 {HOST_BEAT} 字节对齐，给的是 {_hex(addr)}"
         wb = getattr(self.tr, "write_bytes", None)
         if wb is not None:
             wb(WIN_XFER_BUF << 24, data)
@@ -368,10 +369,10 @@ class Soc:
             raise IOError(f"DRAM 写 {_hex(addr)} 超时")
 
     def dram_read(self, addr, nbytes):
-        """读回 [addr, addr+nbytes)，起始地址不必 64 对齐。"""
+        """读回 [addr, addr+nbytes)，起始地址不必对齐。"""
         assert nbytes % 4 == 0 and nbytes <= 16 << 10
         subs = self._split(addr, nbytes)
-        nwords = (subs[-1][3] + subs[-1][2]) * 16          # 缓冲里实际占到的字数
+        nwords = (subs[-1][3] + subs[-1][2]) * (HOST_BEAT // 4)   # 缓冲里实际占到的字数
         wb = getattr(self.tr, "write_bytes", None)
         rb = getattr(self.tr, "read_bytes", None)
         if wb is not None:
@@ -396,7 +397,7 @@ class Soc:
             raw = b"".join(v.to_bytes(4, "little") for v in vals)
         out = b""
         for a, k, _beats, off in subs:
-            start = off * 64 + (a & 0x3F)
+            start = off * HOST_BEAT + (a % HOST_BEAT)
             out += raw[start:start + k]
         return out
 

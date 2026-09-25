@@ -46,29 +46,28 @@ GGUF:
 | 请用一句话介绍一下你自己。 (chat template) | 我是AI助手，专注于帮助用户解决问题和提供支持。 | identical, stops at the same end-of-text token |
 | a 69-token passage (prefill plus 5 fed one at a time) | 深度学习模型可以自动学习图像的特征，而不需要人工设计特征。这说明了什么 | first 17 tokens identical, diverges at the 18th |
 
-Speed: one decode step takes 12,184,243 cycles, 0.24 s at 50 MHz (4.1 token/s); a 64-token
-prefill round takes 54,863,944 cycles, 1.10 s. All seven acceptance bundles emitted by the
+Speed: at 80 MHz one decode step measures 0.088 s (11.38 token/s); a 64-token prefill round
+takes 51,952,270 cycles, 0.65 s. All seven acceptance bundles emitted by the
 compiler pass on the board; the whole-network one runs the full 65 rounds (one prefill plus 64
 decode steps) with logits and token both bit-identical to the golden data.
 
-Post-route utilization. Timing closes against 19 ns, 5% tighter than the board's 20 ns clock
-period, with a worst-case setup slack of +0.220 ns after routing:
+Post-route utilization. Timing closes against the 12.5 ns period of the 80 MHz clock, with a
+worst-case setup slack of +0.036 ns after routing:
 
 | Resource | Used | Available | Share |
 | - | -: | -: | -: |
-| LUT | 256,676 | 298,600 | 86.0% |
-| Flip-flops | 187,770 | 597,200 | 31.4% |
-| BRAM (as RAMB36) | 483.5 | 955 | 50.6% |
-| DSP48 | 980 | 1,920 | 51.0% |
+| LUT | 212,399 | 298,600 | 71.1% |
+| Flip-flops | 152,434 | 597,200 | 25.5% |
+| BRAM (as RAMB36) | 789.5 | 955 | 82.7% |
+| DSP48 | 1,660 | 1,920 | 86.5% |
 
-On-chip placement from that same run:
+On-chip placement from the previous bitstream (50 MHz); the plot for this one is still to come:
 
 ![1.00](docs/placement.png)
 
 The numbers in the legend are cell counts per unit. The 2D matrix unit and the 1D vector unit
 together take more than half; the ring of MIG is the DDR3 controller, and the small block in the
-top right is the 1GbE link layer. SLICE occupancy has reached 99%: the device's programmable
-logic is full.
+top right is the 1GbE link layer.
 
 ## Architecture
 
