@@ -46,18 +46,18 @@ GGUF:
 | 请用一句话介绍一下你自己。 (chat template) | 我是AI助手，专注于帮助用户解决问题和提供支持。 | identical, stops at the same end-of-text token |
 | a 69-token passage (prefill plus 5 fed one at a time) | 深度学习模型可以自动学习图像的特征，而不需要人工设计特征。这说明了什么 | first 17 tokens identical, diverges at the 18th |
 
-Speed: at 80 MHz one decode step measures 0.088 s (11.38 token/s); a 64-token prefill round
-takes 51,952,270 cycles, 0.65 s. All seven acceptance bundles emitted by the
+Speed: at 101.25 MHz one decode step measures 0.065 s (15.45 token/s); a 64-token prefill round
+takes 52,162,834 cycles, 0.52 s. All seven acceptance bundles emitted by the
 compiler pass on the board; the whole-network one runs the full 65 rounds (one prefill plus 64
 decode steps) with logits and token both bit-identical to the golden data.
 
-Post-route utilization. Timing closes against the 12.5 ns period of the 80 MHz clock, with a
-worst-case setup slack of +0.036 ns after routing:
+Post-route utilization. Timing closes against the 9.877 ns period of the 101.25 MHz clock, with a
+worst-case setup slack of +0.064 ns after routing:
 
 | Resource | Used | Available | Share |
 | - | -: | -: | -: |
-| LUT | 212,399 | 298,600 | 71.1% |
-| Flip-flops | 152,434 | 597,200 | 25.5% |
+| LUT | 215,974 | 298,600 | 72.3% |
+| Flip-flops | 157,466 | 597,200 | 26.4% |
 | BRAM (as RAMB36) | 789.5 | 955 | 82.7% |
 | DSP48 | 1,660 | 1,920 | 86.5% |
 

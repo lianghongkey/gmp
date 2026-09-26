@@ -23,30 +23,25 @@ python host/soc_generate.py --file prompt.txt --max-new 32 -v
 
 ## 跑起来是什么样
 
-2026-09-25 的一趟实录。板上已经烧着这份 bitstream，这一趟把 762 MiB 权重整份重灌了一遍：
+2026-09-26 的一趟实录。板上已经烧着这份 bitstream，权重也已经在 DDR3 里，抽查一致就不再重灌：
 
 ```text
-$ python host/soc_generate.py --load-weights --chat "请用一句话介绍一下你自己。"
-── Qwen3 0.6B Instruct：prompt 18 个 token（纯 Python BPE）──
-    计划：不满 64，逐个喂 18 个（decode n_seq = 1..18），然后最多生成 111 个（上下文 128）；停在 [151643, 151645]
+$ python host/soc_generate.py --chat "请简单介绍一下你自己。"
+── Qwen3 0.6B Instruct：prompt 17 个 token（纯 Python BPE）──
+    计划：不满 64，逐个喂 17 个（decode n_seq = 1..17），然后最多生成 112 个（上下文 128）；停在 [151643, 151645]
 ── 板子 ──
 [ethaxi] 网口 enx9cebe8e915b5（9c:eb:e8:e9:15:b5）link UP
     板上认出这颗 SoC
     DDR 校准完成
-── 灌整份权重（762 MiB，约 1 分钟）──
-      … 158 MiB（21.29 MB/s，还要约 0 分钟）
-      …（每 64 MiB 报一行）
-      … 762 MiB（21.26 MB/s，还要约 0 分钟）
-    权重 761.7 MiB 灌完，0.6 分钟
     权重抽查 16 处一致
-    … 已灌 1 MiB（21925 KB/s）
+    … 已灌 1 MiB（21657 KB/s）
     清零：KV 每层前 128 格 × 56 块 + 中间张量 1536 KiB，共 15.5 MiB，1 s
     CPU 报到，程序版本 1
-    逐个喂 18 个：1.6 s
-    （吃 prompt 时片上 top1 猜中下一个 token 6/17 次）
+    逐个喂 17 个：1.2 s
+    （吃 prompt 时片上 top1 猜中下一个 token 6/16 次）
 ── 生成 ──
-我是AI助手，专注于帮助用户解决问题和提供支持。
-── 生成 13 个 token（遇到停止 token），decode 平均 0.087 s/步，11.441 token/s ──
+我是AI助手，专注于帮助用户解决问题和获取信息。如果您有任何问题或需要帮助，请随时告诉我！
+── 生成 23 个 token（遇到停止 token），decode 平均 0.065 s/步，15.476 token/s ──
 ```
 
 ## 这条命令做的六件事
@@ -91,8 +86,8 @@ $ python host/soc_generate.py --load-weights --chat "请用一句话介绍一下
 
 板上那份程序编好了两条路：
 
-* **prefill** 一次处理 64 个 token，prompt 到 64 个及以上时走它，一轮 0.65 秒。
-* **decode** 一次处理一个 token，一步 0.088 秒。prompt 里 prefill 处理不完的那些就靠它逐个喂
+* **prefill** 一次处理 64 个 token，prompt 到 64 个及以上时走它，一轮 0.52 秒。
+* **decode** 一次处理一个 token，一步 0.065 秒。prompt 里 prefill 处理不完的那些就靠它逐个喂
   （不满 64 个的 prompt 整段都这么喂，不能补零凑数）。
 
 prompt 加生成一共最多 128 个 token，这是这份产物的上限。
