@@ -46,20 +46,20 @@ GGUF:
 | 请用一句话介绍一下你自己。 (chat template) | 我是AI助手，专注于帮助用户解决问题和提供支持。 | identical, stops at the same end-of-text token |
 | a 69-token passage (prefill plus 5 fed one at a time) | 深度学习模型可以自动学习图像的特征，而不需要人工设计特征。这说明了什么 | first 17 tokens identical, diverges at the 18th |
 
-Speed: at 101.25 MHz one decode step measures 0.065 s (15.45 token/s); a 64-token prefill round
-takes 52,162,834 cycles, 0.52 s. All seven acceptance bundles emitted by the
+Speed: at 150 MHz one decode step takes 7,619,122 cycles and measures 0.052 s (19.22 token/s); a 64-token prefill round
+takes 53,612,860 cycles, 0.36 s. All seven acceptance bundles emitted by the
 compiler pass on the board; the whole-network one runs the full 65 rounds (one prefill plus 64
 decode steps) with logits and token both bit-identical to the golden data.
 
-Post-route utilization. Timing closes against the 9.877 ns period of the 101.25 MHz clock, with a
-worst-case setup slack of +0.064 ns after routing:
+Post-route utilization. Timing closes against the 6.667 ns period of the 150 MHz clock, with a
+worst-case setup slack of +0.045 ns after routing:
 
 | Resource | Used | Available | Share |
 | - | -: | -: | -: |
-| LUT | 215,974 | 298,600 | 72.3% |
-| Flip-flops | 157,466 | 597,200 | 26.4% |
-| BRAM (as RAMB36) | 789.5 | 955 | 82.7% |
-| DSP48 | 1,660 | 1,920 | 86.5% |
+| LUT | 224,752 | 298,600 | 75.3% |
+| Flip-flops | 211,505 | 597,200 | 35.4% |
+| BRAM (as RAMB36) | 686 | 955 | 71.8% |
+| DSP48 | 1,555 | 1,920 | 81.0% |
 
 On-chip placement from the previous bitstream (50 MHz); the plot for this one is still to come:
 
@@ -203,7 +203,7 @@ became a dangling input port without a word, is now an error.
 
 | Path | Contents |
 | - | - |
-| `prebuilt/bit/top_eth.bit` | The bitstream: two clocks at 50 / 100 MHz, host over 1GbE |
+| `prebuilt/bit/top_eth.bit` | The bitstream: two clocks at 50 / 150 MHz, host over 1GbE |
 | `prebuilt/sim/` | The whole-SoC simulator executable and the two data files it loads, for running the same flow without a board |
 | `data/weights.npz` | Fixed-point weights; each array is named after the DRAM address it goes to |
 | `data/load_image.bin` | The image the board loads itself from at power-up |

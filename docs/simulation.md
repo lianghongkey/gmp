@@ -12,7 +12,7 @@ SoC 的整机 RTL，外加两片 DRAM 模型。主机侧的代码一行都不用
 write32 打成帧经 unix socket 发给它，与经网线打到板上的那两个动作字节等价，所以
 `soc_generate.py` 的流程原样跑在它上面。
 
-它起来时从自己所在的目录装入上电引导码 `cpu_boot_rom.hex`。两个文件合计 2.7 MB。
+它起来时从自己所在的目录装入上电引导码 `cpu_boot_rom.hex`。两个文件合计 3.1 MB。
 
 与 bitstream 一样，这是编译好的产物，RTL 源码不在包内。可执行文件里链进了 Verilator 5.020
 的运行时库，那部分按 LGPL-3.0-only 或 Artistic-2.0 双授权分发。
@@ -43,7 +43,7 @@ decode 要多久。
 python host/soc_generate.py --sim "今天天气不错，我们去"
 ```
 
-喂 prompt 一个 token 一步，生成一个 token 一步，一步 decode 约 692 万拍。`--max-new` 不给
+喂 prompt 一个 token 一步，生成一个 token 一步，一步 decode 约 730 万拍。`--max-new` 不给
 就一直生成到上下文 128 填满，6 个 token 的 prompt 就是 128 步。
 
 算出来的东西与板上一样：`usage.md` 里板上那趟的 prompt“今天天气不错，我们去”，在仿真上
@@ -59,17 +59,17 @@ $ python host/soc_generate.py --sim --max-new 1 "今天天气"
 ── Qwen3 0.6B Instruct：prompt 2 个 token（纯 Python BPE）──
     计划：不满 64，逐个喂 2 个（decode n_seq = 1..2），然后最多生成 1 个（上下文 128）；停在 [151643, 151645]
 ── 仿真 ──
-    仿真起来了：prebuilt/sim/VSocCosimTop（pid 451479），它打印的东西落在 out/sim_gmp_soc_axi.log
-    仿真里认出这颗 SoC，空转 94 k 拍/秒（一步 decode 694 万拍，这个速率下约 1 分钟）
+    仿真起来了：prebuilt/sim/VSocCosimTop（pid 3249940），它打印的东西落在 out/sim_gmp_soc_axi.log
+    仿真里认出这颗 SoC，空转 124 k 拍/秒（一步 decode 762 万拍，这个速率下约 1 分钟）
 ── 灌整份权重（762 MiB，几秒钟）──
-      … 158 MiB（642.90 MB/s，还要约 0 分钟）
+      … 158 MiB（595.88 MB/s，还要约 0 分钟）
       …（每 64 MiB 报一行）
-      … 762 MiB（450.39 MB/s，还要约 0 分钟）
+      … 762 MiB（386.49 MB/s，还要约 0 分钟）
     权重 761.7 MiB 灌完，0.0 分钟
     权重抽查 16 处一致
     清零：KV 每层前 128 格 × 56 块 + 中间张量 1536 KiB，共 15.5 MiB，0 s
     CPU 报到，程序版本 1
-    逐个喂 2 个：84.4 s
+    逐个喂 2 个：204.5 s
     （吃 prompt 时片上 top1 猜中下一个 token 0/1 次）
 ── 生成 ──
 晴
@@ -86,7 +86,7 @@ $ python host/soc_generate.py --sim --max-new 1 "今天天气"
 | 烧 bitstream | 每次板子上电后要烧一遍 | 没有这一步，`--sim` 与 `--program` 不能一起给 |
 | 权重 | 灌一次就留在 DDR3 里，后面几趟都跳过 | 每趟都要重灌：DRAM 模型活在仿真进程里，进程退了就没了 |
 | 往 DRAM 搬字节 | 经片上互联，762 MiB 要三十几秒 | 走后门直接放进 DRAM 模型，不占仿真拍，几秒钟灌完 |
-| 一步 decode | 实测 0.088 秒，CPU 报的拍数约 694 万 | CPU 报的拍数约 692 万，比板上少 0.3% |
+| 一步 decode | 实测 0.052 秒，CPU 报的拍数约 762 万 | CPU 报的拍数约 730 万，比板上少 4% |
 | 一轮的墙钟超时 | 缺省 120 秒 | 缺省 7200 秒，`--max-wall` 改 |
 | DDR 校准 | 板子上电后要等，最多 30 秒 | 起来就是校准完成 |
 

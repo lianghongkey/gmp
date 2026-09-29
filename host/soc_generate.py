@@ -36,7 +36,7 @@ BIT_DEFAULT = os.path.join(DEV.GMP, "prebuilt", "bit", "top_eth.bit")
 JTAG_DIR = os.path.join(DEV.GMP, "tools")
 sys.path.insert(0, JTAG_DIR)
 IDCODE_7K480T = 0x03751093          # 低 28 位；bit[31:28] 是版本号
-DECODE_CYCLES = 6_940_712           # 一步 decode 的拍数（板上 80 MHz 上 0.088 秒），估仿真要多久用
+DECODE_CYCLES = 7_619_122           # 一步 decode 的拍数（板上 150 MHz 上 0.052 秒），估仿真要多久用
 
 
 # ══════════════════════════════════════════════════════════════════════════

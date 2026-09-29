@@ -112,7 +112,7 @@ sudo ip link set <网口名> up
 | 路径 | 大小 | 是什么 |
 | - | -: | - |
 | `prebuilt/bit/top_eth.bit` | 14 MB | bitstream |
-| `prebuilt/sim/VSocCosimTop` | 2.7 MB | 整机仿真，没有板子时走它 |
+| `prebuilt/sim/VSocCosimTop` | 3.1 MB | 整机仿真，没有板子时走它 |
 | `prebuilt/sim/cpu_boot_rom.hex` | 198 B | 仿真起来时装入的引导码 |
 | `data/weights.npz` | 799 MB | 定点权重，每个数组的名字就是它在 DRAM 里的地址 |
 | `data/load_image.bin` | 56 KB | 启动镜像，板子上电后照着它把程序装进片上 |
